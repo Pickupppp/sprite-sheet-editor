@@ -10,12 +10,18 @@ type LoadedImage = {
   height: number;
   originalWidth: number;
   originalHeight: number;
+  sourceType: 'image' | 'video';
+  extractedFrameCount?: number;
+  sourceFrameWidth?: number;
+  sourceFrameHeight?: number;
 };
 
 const MIN_SCALE = 1;
 const MAX_SCALE = 8;
 const RESOLUTION_SCALE_OPTIONS = [1, 0.75, 0.5, 0.25] as const;
 const DEFAULT_RESOLUTION_SCALE = 1;
+const MAX_VIDEO_FRAME_COUNT = 30;
+const MAX_VIDEO_SPRITE_SHEET_WIDTH = 30000;
 const MIN_BRUSH_SIZE = 1;
 const MAX_BRUSH_SIZE = 32;
 const DEFAULT_BRUSH_SIZE = 4;
@@ -27,7 +33,7 @@ const DEFAULT_EXPORT_BACKGROUND_COLOR = '#ffffff';
 const DEFAULT_GRID_ROWS = 4;
 const DEFAULT_GRID_COLUMNS = 4;
 const MIN_GRID_SIZE = 1;
-const MAX_GRID_SIZE = 12;
+const MAX_GRID_SIZE = 30;
 const DEFAULT_ANIMATION_FRAME_INTERVAL_MS = 180;
 const MIN_ANIMATION_FRAME_INTERVAL_MS = 60;
 const MAX_ANIMATION_FRAME_INTERVAL_MS = 1000;
@@ -45,6 +51,15 @@ type CanvasPoint = {
   x: number;
   y: number;
 };
+
+type CropInsets = {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
+};
+
+type CropInsetKey = keyof CropInsets;
 
 type SpriteFrame = {
   id: string;
@@ -110,6 +125,121 @@ function readBitmapImageData(bitmap: ImageBitmap) {
   return context.getImageData(0, 0, bitmap.width, bitmap.height);
 }
 
+function waitForVideoEvent(video: HTMLVideoElement, eventName: keyof HTMLMediaElementEventMap) {
+  return new Promise<void>((resolve, reject) => {
+    const cleanup = () => {
+      video.removeEventListener(eventName, handleEvent);
+      video.removeEventListener('error', handleError);
+    };
+    const handleEvent = () => {
+      cleanup();
+      resolve();
+    };
+    const handleError = () => {
+      cleanup();
+      reject(new Error('Video could not be decoded.'));
+    };
+
+    video.addEventListener(eventName, handleEvent, { once: true });
+    video.addEventListener('error', handleError, { once: true });
+  });
+}
+
+function seekVideoTo(video: HTMLVideoElement, timestamp: number) {
+  if (Math.abs(video.currentTime - timestamp) < 0.001 && video.readyState >= 2) {
+    return Promise.resolve();
+  }
+
+  return new Promise<void>((resolve, reject) => {
+    const cleanup = () => {
+      window.clearTimeout(timeoutId);
+      video.removeEventListener('seeked', handleSeeked);
+      video.removeEventListener('error', handleError);
+    };
+    const handleSeeked = () => {
+      cleanup();
+      resolve();
+    };
+    const handleError = () => {
+      cleanup();
+      reject(new Error('Video seek failed.'));
+    };
+    const timeoutId = window.setTimeout(() => {
+      cleanup();
+      reject(new Error('Video seek timed out.'));
+    }, 8000);
+
+    video.addEventListener('seeked', handleSeeked, { once: true });
+    video.addEventListener('error', handleError, { once: true });
+    video.currentTime = timestamp;
+  });
+}
+
+async function readVideoSpriteSheetImageData(file: File) {
+  const objectUrl = URL.createObjectURL(file);
+  const video = document.createElement('video');
+  video.muted = true;
+  video.playsInline = true;
+  video.preload = 'auto';
+
+  try {
+    video.src = objectUrl;
+    video.load();
+    await waitForVideoEvent(video, 'loadedmetadata');
+
+    const frameWidth = video.videoWidth;
+    const frameHeight = video.videoHeight;
+    const duration = Number.isFinite(video.duration) ? video.duration : 0;
+
+    if (frameWidth <= 0 || frameHeight <= 0) {
+      throw new Error('Video dimensions are not available.');
+    }
+
+    if (video.readyState < 2) {
+      await waitForVideoEvent(video, 'loadeddata');
+    }
+
+    const maxFrameCountByCanvasWidth = Math.max(
+      1,
+      Math.floor(MAX_VIDEO_SPRITE_SHEET_WIDTH / frameWidth),
+    );
+    const extractedFrameCount =
+      duration > 0 ? Math.min(MAX_VIDEO_FRAME_COUNT, maxFrameCountByCanvasWidth) : 1;
+    const spriteCanvas = document.createElement('canvas');
+    spriteCanvas.width = frameWidth * extractedFrameCount;
+    spriteCanvas.height = frameHeight;
+
+    const spriteContext = spriteCanvas.getContext('2d', { willReadFrequently: true });
+    if (!spriteContext) {
+      throw new Error('Canvas context is not available.');
+    }
+
+    spriteContext.imageSmoothingEnabled = false;
+    spriteContext.clearRect(0, 0, spriteCanvas.width, spriteCanvas.height);
+
+    for (let frameIndex = 0; frameIndex < extractedFrameCount; frameIndex += 1) {
+      const timestamp =
+        duration > 0
+          ? Math.min(Math.max(duration - 0.001, 0), (duration * frameIndex) / extractedFrameCount)
+          : 0;
+      await seekVideoTo(video, timestamp);
+      spriteContext.drawImage(video, frameIndex * frameWidth, 0, frameWidth, frameHeight);
+    }
+
+    return {
+      duration,
+      extractedFrameCount,
+      frameHeight,
+      frameWidth,
+      imageData: spriteContext.getImageData(0, 0, spriteCanvas.width, spriteCanvas.height),
+    };
+  } finally {
+    video.removeAttribute('src');
+    video.load();
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
 function resizeImageData(sourceImageData: ImageData, resolutionScale: ResolutionScale) {
   if (resolutionScale === 1) {
     return new ImageData(
@@ -158,6 +288,108 @@ function parseResolutionScale(value: string): ResolutionScale {
 
 function formatResolutionScale(resolutionScale: ResolutionScale) {
   return `${Math.round(resolutionScale * 100)}%`;
+}
+
+function createDefaultCropInsets(): CropInsets {
+  return {
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+  };
+}
+
+function clampCropValue(value: number) {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+
+  return Math.max(0, Math.round(value));
+}
+
+function sanitizeCropInsets(cropInsets: CropInsets, width: number, height: number): CropInsets {
+  const top = Math.min(clampCropValue(cropInsets.top), Math.max(0, height - 1));
+  const bottom = Math.min(clampCropValue(cropInsets.bottom), Math.max(0, height - top - 1));
+  const left = Math.min(clampCropValue(cropInsets.left), Math.max(0, width - 1));
+  const right = Math.min(clampCropValue(cropInsets.right), Math.max(0, width - left - 1));
+
+  return {
+    top,
+    right,
+    bottom,
+    left,
+  };
+}
+
+function cropImageData(sourceImageData: ImageData, cropInsets: CropInsets) {
+  const sanitizedCropInsets = sanitizeCropInsets(
+    cropInsets,
+    sourceImageData.width,
+    sourceImageData.height,
+  );
+  const targetWidth = sourceImageData.width - sanitizedCropInsets.left - sanitizedCropInsets.right;
+  const targetHeight = sourceImageData.height - sanitizedCropInsets.top - sanitizedCropInsets.bottom;
+
+  if (
+    targetWidth === sourceImageData.width &&
+    targetHeight === sourceImageData.height &&
+    sanitizedCropInsets.top === 0 &&
+    sanitizedCropInsets.left === 0
+  ) {
+    return {
+      cropInsets: sanitizedCropInsets,
+      imageData: new ImageData(
+        new Uint8ClampedArray(sourceImageData.data),
+        sourceImageData.width,
+        sourceImageData.height,
+      ),
+    };
+  }
+
+  const sourceCanvas = document.createElement('canvas');
+  sourceCanvas.width = sourceImageData.width;
+  sourceCanvas.height = sourceImageData.height;
+
+  const sourceContext = sourceCanvas.getContext('2d', { willReadFrequently: true });
+  if (!sourceContext) {
+    throw new Error('Canvas context is not available.');
+  }
+
+  sourceContext.putImageData(sourceImageData, 0, 0);
+
+  return {
+    cropInsets: sanitizedCropInsets,
+    imageData: sourceContext.getImageData(
+      sanitizedCropInsets.left,
+      sanitizedCropInsets.top,
+      targetWidth,
+      targetHeight,
+    ),
+  };
+}
+
+function prepareImageData(
+  sourceImageData: ImageData,
+  resolutionScale: ResolutionScale,
+  cropInsets: CropInsets,
+) {
+  const resizedImageData = resizeImageData(sourceImageData, resolutionScale);
+  return cropImageData(resizedImageData, cropInsets);
+}
+
+function scaleCropInsets(
+  cropInsets: CropInsets,
+  currentResolutionScale: ResolutionScale,
+  nextResolutionScale: ResolutionScale,
+): CropInsets {
+  const ratio = nextResolutionScale / currentResolutionScale;
+
+  return {
+    top: Math.round(cropInsets.top * ratio),
+    right: Math.round(cropInsets.right * ratio),
+    bottom: Math.round(cropInsets.bottom * ratio),
+    left: Math.round(cropInsets.left * ratio),
+  };
 }
 
 function renderScaledImageDataToCanvas(
@@ -630,6 +862,7 @@ function App() {
   const [resolutionScale, setResolutionScale] = React.useState<ResolutionScale>(
     DEFAULT_RESOLUTION_SCALE,
   );
+  const [cropInsets, setCropInsets] = React.useState<CropInsets>(createDefaultCropInsets);
   const [isEraserMode, setIsEraserMode] = React.useState(false);
   const [brushSize, setBrushSize] = React.useState(DEFAULT_BRUSH_SIZE);
   const [backgroundColor, setBackgroundColor] = React.useState(DEFAULT_BACKGROUND_COLOR);
@@ -661,6 +894,8 @@ function App() {
     DEFAULT_EXPORT_BACKGROUND_COLOR,
   );
   const [backgroundRemovalStatus, setBackgroundRemovalStatus] = React.useState('');
+  const [cropStatus, setCropStatus] = React.useState('');
+  const [importStatus, setImportStatus] = React.useState('');
   const [exportStatus, setExportStatus] = React.useState('');
   const [error, setError] = React.useState('');
 
@@ -687,6 +922,19 @@ function App() {
   const transparentPreviewStyle: React.CSSProperties | undefined = isBackgroundPreviewEnabled
     ? { backgroundColor: previewBackgroundColor }
     : undefined;
+  const currentBaseProcessingSize = React.useMemo(() => {
+    return image
+      ? {
+          width: Math.max(1, Math.round(image.sourceImageData.width * resolutionScale)),
+          height: Math.max(1, Math.round(image.sourceImageData.height * resolutionScale)),
+        }
+      : null;
+  }, [image, resolutionScale]);
+  const totalCroppedPixelCount =
+    currentBaseProcessingSize && image
+      ? currentBaseProcessingSize.width * currentBaseProcessingSize.height -
+        image.width * image.height
+      : 0;
 
   const spriteFrames = React.useMemo(() => {
     return processedImageData
@@ -784,58 +1032,114 @@ function App() {
   async function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     setError('');
+    setImportStatus('');
 
     if (!file) {
       return;
     }
 
-    if (!file.type.startsWith('image/')) {
-      setError('请选择有效的图片文件。');
+    const isImageFile = file.type.startsWith('image/');
+    const isVideoFile = file.type.startsWith('video/');
+
+    if (!isImageFile && !isVideoFile) {
+      setError('请选择有效的图片或视频文件。');
       event.target.value = '';
       return;
     }
 
     try {
-      const bitmap = await createImageBitmap(file);
-      const sourceImageData = readBitmapImageData(bitmap);
-      const imageData = resizeImageData(sourceImageData, DEFAULT_RESOLUTION_SCALE);
-      const originalWidth = bitmap.width;
-      const originalHeight = bitmap.height;
-      bitmap.close();
+      setImportStatus(isVideoFile ? `正在从视频中抽取最多 ${MAX_VIDEO_FRAME_COUNT} 帧...` : '');
+      let sourceImageData: ImageData;
+      let originalWidth: number;
+      let originalHeight: number;
+      let sourceType: LoadedImage['sourceType'];
+      let extractedFrameCount: number | undefined;
+      let sourceFrameWidth: number | undefined;
+      let sourceFrameHeight: number | undefined;
+
+      if (isVideoFile) {
+        const videoSpriteSheet = await readVideoSpriteSheetImageData(file);
+        sourceImageData = videoSpriteSheet.imageData;
+        originalWidth = videoSpriteSheet.imageData.width;
+        originalHeight = videoSpriteSheet.imageData.height;
+        sourceType = 'video';
+        extractedFrameCount = videoSpriteSheet.extractedFrameCount;
+        sourceFrameWidth = videoSpriteSheet.frameWidth;
+        sourceFrameHeight = videoSpriteSheet.frameHeight;
+      } else {
+        const bitmap = await createImageBitmap(file);
+        sourceImageData = readBitmapImageData(bitmap);
+        originalWidth = bitmap.width;
+        originalHeight = bitmap.height;
+        sourceType = 'image';
+        bitmap.close();
+      }
+
+      const defaultCropInsets = createDefaultCropInsets();
+      const preparedImage = prepareImageData(
+        sourceImageData,
+        DEFAULT_RESOLUTION_SCALE,
+        defaultCropInsets,
+      );
       setImage({
-        imageData,
+        imageData: preparedImage.imageData,
         sourceImageData,
         name: file.name,
-        width: imageData.width,
-        height: imageData.height,
+        width: preparedImage.imageData.width,
+        height: preparedImage.imageData.height,
         originalWidth,
         originalHeight,
+        sourceType,
+        extractedFrameCount,
+        sourceFrameWidth,
+        sourceFrameHeight,
       });
       setResolutionScale(DEFAULT_RESOLUTION_SCALE);
+      setCropInsets(preparedImage.cropInsets);
+      setGridRows(sourceType === 'video' ? 1 : DEFAULT_GRID_ROWS);
+      setGridColumns(extractedFrameCount ?? DEFAULT_GRID_COLUMNS);
       resetFrameAssembly();
       setHasBackgroundColorSelection(false);
       setBackgroundRemovalStatus('');
+      setCropStatus('');
+      setImportStatus(
+        sourceType === 'video' && extractedFrameCount
+          ? `已抽取 ${extractedFrameCount} 帧，并组合为 ${preparedImage.imageData.width} × ${preparedImage.imageData.height}px 单行长图。`
+          : '',
+      );
       setExportStatus('');
     } catch {
-      setError('图片解码失败，请换一张图片重试。');
+      setImportStatus('');
+      setError(
+        isVideoFile
+          ? '视频解码或抽帧失败，请换一个浏览器支持的视频重试。'
+          : '图片解码失败，请换一张图片重试。',
+      );
     }
   }
 
   function handleResolutionScaleChange(value: string) {
     const nextResolutionScale = parseResolutionScale(value);
-    setResolutionScale(nextResolutionScale);
 
     if (!image) {
+      setResolutionScale(nextResolutionScale);
       return;
     }
 
     try {
-      const imageData = resizeImageData(image.sourceImageData, nextResolutionScale);
+      const nextCropInsets = scaleCropInsets(cropInsets, resolutionScale, nextResolutionScale);
+      const preparedImage = prepareImageData(
+        image.sourceImageData,
+        nextResolutionScale,
+        nextCropInsets,
+      );
+      setResolutionScale(nextResolutionScale);
+      setCropInsets(preparedImage.cropInsets);
       setImage({
         ...image,
-        imageData,
-        width: imageData.width,
-        height: imageData.height,
+        imageData: preparedImage.imageData,
+        width: preparedImage.imageData.width,
+        height: preparedImage.imageData.height,
       });
       resetFrameAssembly();
       setHasBackgroundColorSelection(false);
@@ -844,9 +1148,74 @@ function App() {
           ? '已恢复原始处理分辨率，请重新取色。'
           : `已将处理分辨率缩小到 ${formatResolutionScale(nextResolutionScale)}，请重新取色。`,
       );
+      setCropStatus('处理分辨率已变化，裁剪数值已按比例调整。');
       setExportStatus('');
     } catch {
       setError('调整处理分辨率失败，当前浏览器无法重新采样图片。');
+    }
+  }
+
+  function handleCropInsetChange(cropInsetKey: CropInsetKey, value: string) {
+    if (!image) {
+      return;
+    }
+
+    const nextCropInsets = {
+      ...cropInsets,
+      [cropInsetKey]: clampCropValue(Number(value)),
+    };
+
+    try {
+      const preparedImage = prepareImageData(
+        image.sourceImageData,
+        resolutionScale,
+        nextCropInsets,
+      );
+      setCropInsets(preparedImage.cropInsets);
+      setImage({
+        ...image,
+        imageData: preparedImage.imageData,
+        width: preparedImage.imageData.width,
+        height: preparedImage.imageData.height,
+      });
+      resetFrameAssembly();
+      setHasBackgroundColorSelection(false);
+      setBackgroundRemovalStatus('');
+      setCropStatus(
+        `已裁剪为 ${preparedImage.imageData.width} × ${preparedImage.imageData.height}px，切分前请重新取色。`,
+      );
+      setExportStatus('');
+    } catch {
+      setError('调整裁剪区域失败，当前浏览器无法重新生成图片。');
+    }
+  }
+
+  function handleResetCrop() {
+    if (!image) {
+      return;
+    }
+
+    try {
+      const defaultCropInsets = createDefaultCropInsets();
+      const preparedImage = prepareImageData(
+        image.sourceImageData,
+        resolutionScale,
+        defaultCropInsets,
+      );
+      setCropInsets(preparedImage.cropInsets);
+      setImage({
+        ...image,
+        imageData: preparedImage.imageData,
+        width: preparedImage.imageData.width,
+        height: preparedImage.imageData.height,
+      });
+      resetFrameAssembly();
+      setHasBackgroundColorSelection(false);
+      setBackgroundRemovalStatus('');
+      setCropStatus('已清除裁剪，恢复当前处理分辨率下的完整画布。');
+      setExportStatus('');
+    } catch {
+      setError('重置裁剪失败，当前浏览器无法重新生成图片。');
     }
   }
 
@@ -1157,14 +1526,15 @@ function App() {
         <p className="eyebrow">Sprite Sheet Editor · Task 11</p>
         <h1>背景处理、切帧与重组</h1>
         <p className="intro-copy">
-          导入本地像素精灵图，处理背景和杂色后，按可调整网格生成独立帧并重组最终序列。
+          导入本地像素精灵图或视频，处理背景和杂色后，按可调整网格生成独立帧并重组最终序列。
         </p>
 
         <label className="file-picker">
-          <span>选择图片</span>
-          <input type="file" accept="image/*" onChange={handleFileChange} />
+          <span>选择图片或视频</span>
+          <input type="file" accept="image/*,video/*" onChange={handleFileChange} />
         </label>
 
+        {importStatus ? <p className="import-status">{importStatus}</p> : null}
         {error ? <p className="error-message">{error}</p> : null}
       </section>
 
@@ -1205,6 +1575,122 @@ function App() {
             </select>
           </label>
         </div>
+
+        <section className="crop-panel" aria-label="裁剪周围区域">
+          <div className="crop-panel__header">
+            <div>
+              <p className="eyebrow">Crop Canvas</p>
+              <h2>裁剪周围区域</h2>
+            </div>
+            <p className="crop-panel__summary">
+              {image
+                ? `已裁掉 ${totalCroppedPixelCount} 个像素，当前处理尺寸 ${image.width} × ${image.height}px`
+                : '导入图片后可按像素裁掉四周空白'}
+            </p>
+          </div>
+
+          <div className="crop-controls" aria-label="四周裁剪像素">
+            <label className="number-control">
+              <span>
+                <span className="label">上</span>
+                <strong>{cropInsets.top}px</strong>
+              </span>
+              <input
+                type="number"
+                min="0"
+                max={
+                  currentBaseProcessingSize
+                    ? Math.max(0, currentBaseProcessingSize.height - cropInsets.bottom - 1)
+                    : 0
+                }
+                value={cropInsets.top}
+                onChange={(event) => handleCropInsetChange('top', event.target.value)}
+                disabled={!image}
+                aria-label="裁剪顶部像素"
+              />
+            </label>
+
+            <label className="number-control">
+              <span>
+                <span className="label">右</span>
+                <strong>{cropInsets.right}px</strong>
+              </span>
+              <input
+                type="number"
+                min="0"
+                max={
+                  currentBaseProcessingSize
+                    ? Math.max(0, currentBaseProcessingSize.width - cropInsets.left - 1)
+                    : 0
+                }
+                value={cropInsets.right}
+                onChange={(event) => handleCropInsetChange('right', event.target.value)}
+                disabled={!image}
+                aria-label="裁剪右侧像素"
+              />
+            </label>
+
+            <label className="number-control">
+              <span>
+                <span className="label">下</span>
+                <strong>{cropInsets.bottom}px</strong>
+              </span>
+              <input
+                type="number"
+                min="0"
+                max={
+                  currentBaseProcessingSize
+                    ? Math.max(0, currentBaseProcessingSize.height - cropInsets.top - 1)
+                    : 0
+                }
+                value={cropInsets.bottom}
+                onChange={(event) => handleCropInsetChange('bottom', event.target.value)}
+                disabled={!image}
+                aria-label="裁剪底部像素"
+              />
+            </label>
+
+            <label className="number-control">
+              <span>
+                <span className="label">左</span>
+                <strong>{cropInsets.left}px</strong>
+              </span>
+              <input
+                type="number"
+                min="0"
+                max={
+                  currentBaseProcessingSize
+                    ? Math.max(0, currentBaseProcessingSize.width - cropInsets.right - 1)
+                    : 0
+                }
+                value={cropInsets.left}
+                onChange={(event) => handleCropInsetChange('left', event.target.value)}
+                disabled={!image}
+                aria-label="裁剪左侧像素"
+              />
+            </label>
+
+            <button
+              type="button"
+              className="tool-button crop-reset-button"
+              onClick={handleResetCrop}
+              disabled={
+                !image ||
+                (cropInsets.top === 0 &&
+                  cropInsets.right === 0 &&
+                  cropInsets.bottom === 0 &&
+                  cropInsets.left === 0)
+              }
+            >
+              重置裁剪
+            </button>
+          </div>
+
+          <p className="hint">
+            裁剪会改变后续取色、去背景、切帧和导出的处理尺寸；调整后最终序列会被清空。
+          </p>
+          {cropStatus ? <p className="crop-status">{cropStatus}</p> : null}
+        </section>
 
         <section className="background-workflow" aria-label="去背景流程">
           <div className="background-workflow__header">
@@ -1381,9 +1867,12 @@ function App() {
 
         {image ? (
           <p className="meta">
-            {image.name} · 导入尺寸 {image.originalWidth} × {image.originalHeight}px · 处理尺寸{' '}
-            {image.width} × {image.height}px · canvas 显示尺寸 {image.width * scale} ×{' '}
-            {image.height * scale}px · 预计可透明化{' '}
+            {image.name} ·{' '}
+            {image.sourceType === 'video' && image.extractedFrameCount
+              ? `视频抽帧 ${image.extractedFrameCount} 帧，单帧 ${image.sourceFrameWidth} × ${image.sourceFrameHeight}px，长图尺寸 ${image.originalWidth} × ${image.originalHeight}px`
+              : `导入尺寸 ${image.originalWidth} × ${image.originalHeight}px`}{' '}
+            · 处理尺寸 {image.width} × {image.height}px · canvas 显示尺寸{' '}
+            {image.width * scale} × {image.height * scale}px · 预计可透明化{' '}
             {backgroundTransparentPixelCount} 个像素 · 当前图片透明像素{' '}
             {currentTransparentPixelCount} 个
           </p>
