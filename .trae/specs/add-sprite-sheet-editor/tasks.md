@@ -1,0 +1,56 @@
+# Tasks
+- [x] Task 1: 确认现有项目结构与图片编辑入口：定位前端框架、页面入口、构建脚本与可复用的画布组件。
+  - [x] SubTask 1.1: 检查项目依赖和现有页面结构
+  - [x] SubTask 1.2: 确认图片导入、状态管理和导出可放置的位置
+- [x] Task 2: 实现图片导入与像素画布预览：支持本地图片载入、原图预览和不平滑缩放显示。
+  - [x] SubTask 2.1: 增加图片文件选择与解码流程
+  - [x] SubTask 2.2: 使用画布渲染原始图片并关闭图像平滑
+  - [x] SubTask 2.3: 提供基础缩放预览能力
+- [x] Task 3: 实现背景色处理：支持取色、去除背景色、切换预览背景色和透明背景显示。
+  - [x] SubTask 3.1: 增加背景取色或颜色输入控件
+  - [x] SubTask 3.2: 将匹配背景色的像素转为透明
+  - [x] SubTask 3.3: 支持透明区域使用指定背景色预览
+- [x] Task 4: 实现橡皮擦工具：支持在像素画布上擦除杂色并更新图片数据。
+  - [x] SubTask 4.1: 增加橡皮擦模式和笔刷大小设置
+  - [x] SubTask 4.2: 将拖动路径对应像素转为透明
+  - [x] SubTask 4.3: 确保擦除结果参与后续切分和导出
+- [x] Task 5: 实现精灵表切分：支持默认 4*4 网格切分，并允许用户调整行列数。
+  - [x] SubTask 5.1: 增加行列数配置
+  - [x] SubTask 5.2: 按网格生成独立帧预览
+  - [x] SubTask 5.3: 支持单帧选择和复制来源记录
+- [x] Task 6: 实现帧重组与排序：支持从切分帧中选择、复制、删除和调整最终序列顺序。
+  - [x] SubTask 6.1: 增加最终帧序列区域
+  - [x] SubTask 6.2: 支持添加同一帧多次
+  - [x] SubTask 6.3: 支持调整帧顺序和移除帧
+- [x] Task 7: 实现导出成品图：按最终帧序列生成新图片，支持透明背景或指定背景色导出。
+  - [x] SubTask 7.1: 根据帧尺寸和序列生成导出画布
+  - [x] SubTask 7.2: 支持透明背景 PNG 导出
+  - [x] SubTask 7.3: 支持指定背景色填充后导出
+- [x] Task 8: 验证核心流程：覆盖导入、去背景、擦除、4*4 切分、帧重组和导出流程。
+  - [x] SubTask 8.1: 运行现有 lint、类型检查或构建命令
+  - [x] SubTask 8.2: 对主要交互流程进行手动验证
+  - [x] SubTask 8.3: 如项目已有测试框架，补充低成本的图像处理单元测试
+- [x] Task 9: 实现多行最终帧序列：支持新增、删除和选择最终序列行，并让每行独立管理帧。
+  - [x] SubTask 9.1: 将最终帧序列状态从单行扩展为多行结构
+  - [x] SubTask 9.2: 支持新增行、删除行和选择当前编辑行
+  - [x] SubTask 9.3: 支持对指定行添加、删除、上移和下移帧
+- [x] Task 10: 实现每行动画循环预览：每行按自身帧顺序循环播放精灵图动态效果。
+  - [x] SubTask 10.1: 增加行内动画预览组件
+  - [x] SubTask 10.2: 支持播放、暂停和全局帧间隔设置
+  - [x] SubTask 10.3: 确保动画预览保持像素清晰并支持背景预览开关
+- [x] Task 11: 更新多行导出与验证：导出时保留多行布局，并验证多行重组和播放流程。
+  - [x] SubTask 11.1: 更新导出画布为多行布局
+  - [x] SubTask 11.2: 运行构建和诊断检查
+  - [x] SubTask 11.3: 手动核对新增多行与循环播放交互
+
+# Task Dependencies
+- Task 2 depends on Task 1
+- Task 3 depends on Task 2
+- Task 4 depends on Task 2
+- Task 5 depends on Task 2 and Task 3
+- Task 6 depends on Task 5
+- Task 7 depends on Task 6
+- Task 8 depends on Task 3, Task 4, Task 5, Task 6, and Task 7
+- Task 9 depends on Task 6
+- Task 10 depends on Task 9
+- Task 11 depends on Task 9 and Task 10
