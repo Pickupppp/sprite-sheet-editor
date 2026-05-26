@@ -4,13 +4,18 @@ import './styles.css';
 
 type LoadedImage = {
   imageData: ImageData;
+  sourceImageData: ImageData;
   name: string;
   width: number;
   height: number;
+  originalWidth: number;
+  originalHeight: number;
 };
 
 const MIN_SCALE = 1;
 const MAX_SCALE = 8;
+const RESOLUTION_SCALE_OPTIONS = [1, 0.75, 0.5, 0.25] as const;
+const DEFAULT_RESOLUTION_SCALE = 1;
 const MIN_BRUSH_SIZE = 1;
 const MAX_BRUSH_SIZE = 32;
 const DEFAULT_BRUSH_SIZE = 4;
@@ -28,6 +33,7 @@ const MIN_ANIMATION_FRAME_INTERVAL_MS = 60;
 const MAX_ANIMATION_FRAME_INTERVAL_MS = 1000;
 
 type ExportBackgroundMode = 'transparent' | 'solid';
+type ResolutionScale = (typeof RESOLUTION_SCALE_OPTIONS)[number];
 
 type RgbColor = {
   red: number;
@@ -102,6 +108,56 @@ function readBitmapImageData(bitmap: ImageBitmap) {
 
   context.drawImage(bitmap, 0, 0);
   return context.getImageData(0, 0, bitmap.width, bitmap.height);
+}
+
+function resizeImageData(sourceImageData: ImageData, resolutionScale: ResolutionScale) {
+  if (resolutionScale === 1) {
+    return new ImageData(
+      new Uint8ClampedArray(sourceImageData.data),
+      sourceImageData.width,
+      sourceImageData.height,
+    );
+  }
+
+  const targetWidth = Math.max(1, Math.round(sourceImageData.width * resolutionScale));
+  const targetHeight = Math.max(1, Math.round(sourceImageData.height * resolutionScale));
+  const sourceCanvas = document.createElement('canvas');
+  sourceCanvas.width = sourceImageData.width;
+  sourceCanvas.height = sourceImageData.height;
+
+  const sourceContext = sourceCanvas.getContext('2d');
+  if (!sourceContext) {
+    throw new Error('Canvas context is not available.');
+  }
+
+  sourceContext.putImageData(sourceImageData, 0, 0);
+
+  const targetCanvas = document.createElement('canvas');
+  targetCanvas.width = targetWidth;
+  targetCanvas.height = targetHeight;
+
+  const targetContext = targetCanvas.getContext('2d', { willReadFrequently: true });
+  if (!targetContext) {
+    throw new Error('Canvas context is not available.');
+  }
+
+  targetContext.imageSmoothingEnabled = false;
+  targetContext.clearRect(0, 0, targetWidth, targetHeight);
+  targetContext.drawImage(sourceCanvas, 0, 0, targetWidth, targetHeight);
+
+  return targetContext.getImageData(0, 0, targetWidth, targetHeight);
+}
+
+function parseResolutionScale(value: string): ResolutionScale {
+  const numericValue = Number(value);
+  return (
+    RESOLUTION_SCALE_OPTIONS.find((resolutionScale) => resolutionScale === numericValue) ??
+    DEFAULT_RESOLUTION_SCALE
+  );
+}
+
+function formatResolutionScale(resolutionScale: ResolutionScale) {
+  return `${Math.round(resolutionScale * 100)}%`;
 }
 
 function renderScaledImageDataToCanvas(
@@ -571,9 +627,13 @@ function App() {
   const lastErasePointRef = React.useRef<CanvasPoint | null>(null);
   const [image, setImage] = React.useState<LoadedImage | null>(null);
   const [scale, setScale] = React.useState(2);
+  const [resolutionScale, setResolutionScale] = React.useState<ResolutionScale>(
+    DEFAULT_RESOLUTION_SCALE,
+  );
   const [isEraserMode, setIsEraserMode] = React.useState(false);
   const [brushSize, setBrushSize] = React.useState(DEFAULT_BRUSH_SIZE);
   const [backgroundColor, setBackgroundColor] = React.useState(DEFAULT_BACKGROUND_COLOR);
+  const [hasBackgroundColorSelection, setHasBackgroundColorSelection] = React.useState(false);
   const [backgroundTolerance, setBackgroundTolerance] = React.useState(
     DEFAULT_BACKGROUND_TOLERANCE,
   );
@@ -609,10 +669,19 @@ function App() {
   }, [image]);
 
   const processedImageData = React.useMemo(() => {
-    return image
-      ? removeMatchingBackground(image.imageData, backgroundColor, backgroundTolerance)
-      : null;
-  }, [backgroundColor, backgroundTolerance, image]);
+    if (!image) {
+      return null;
+    }
+
+    if (!hasBackgroundColorSelection) {
+      return {
+        imageData: image.imageData,
+        transparentPixelCount: 0,
+      };
+    }
+
+    return removeMatchingBackground(image.imageData, backgroundColor, backgroundTolerance);
+  }, [backgroundColor, backgroundTolerance, hasBackgroundColorSelection, image]);
 
   const backgroundTransparentPixelCount = processedImageData?.transparentPixelCount ?? 0;
   const transparentPreviewStyle: React.CSSProperties | undefined = isBackgroundPreviewEnabled
@@ -702,6 +771,16 @@ function App() {
     });
   }, [finalSequenceRows]);
 
+  function resetFrameAssembly() {
+    setSelectedFrameId(null);
+    sequenceFrameCounterRef.current = 0;
+    sequenceRowCounterRef.current = 1;
+    setFinalSequenceRows(createInitialFinalSequenceRows());
+    setSelectedSequenceRowId('sequence-row-1');
+    setPlayingSequenceRowIds(new Set());
+    setCopiedFrameSource(null);
+  }
+
   async function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     setError('');
@@ -718,25 +797,56 @@ function App() {
 
     try {
       const bitmap = await createImageBitmap(file);
-      const imageData = readBitmapImageData(bitmap);
-      const { width, height } = bitmap;
+      const sourceImageData = readBitmapImageData(bitmap);
+      const imageData = resizeImageData(sourceImageData, DEFAULT_RESOLUTION_SCALE);
+      const originalWidth = bitmap.width;
+      const originalHeight = bitmap.height;
       bitmap.close();
       setImage({
         imageData,
+        sourceImageData,
         name: file.name,
-        width,
-        height,
+        width: imageData.width,
+        height: imageData.height,
+        originalWidth,
+        originalHeight,
       });
-      setSelectedFrameId(null);
-      sequenceFrameCounterRef.current = 0;
-      sequenceRowCounterRef.current = 1;
-      setFinalSequenceRows(createInitialFinalSequenceRows());
-      setSelectedSequenceRowId('sequence-row-1');
-      setPlayingSequenceRowIds(new Set());
-      setCopiedFrameSource(null);
+      setResolutionScale(DEFAULT_RESOLUTION_SCALE);
+      resetFrameAssembly();
+      setHasBackgroundColorSelection(false);
       setBackgroundRemovalStatus('');
+      setExportStatus('');
     } catch {
       setError('图片解码失败，请换一张图片重试。');
+    }
+  }
+
+  function handleResolutionScaleChange(value: string) {
+    const nextResolutionScale = parseResolutionScale(value);
+    setResolutionScale(nextResolutionScale);
+
+    if (!image) {
+      return;
+    }
+
+    try {
+      const imageData = resizeImageData(image.sourceImageData, nextResolutionScale);
+      setImage({
+        ...image,
+        imageData,
+        width: imageData.width,
+        height: imageData.height,
+      });
+      resetFrameAssembly();
+      setHasBackgroundColorSelection(false);
+      setBackgroundRemovalStatus(
+        nextResolutionScale === 1
+          ? '已恢复原始处理分辨率，请重新取色。'
+          : `已将处理分辨率缩小到 ${formatResolutionScale(nextResolutionScale)}，请重新取色。`,
+      );
+      setExportStatus('');
+    } catch {
+      setError('调整处理分辨率失败，当前浏览器无法重新采样图片。');
     }
   }
 
@@ -752,12 +862,26 @@ function App() {
 
     const pixelIndex = (point.y * image.width + point.x) * 4;
     const { data } = image.imageData;
+    const alpha = data[pixelIndex + 3];
+
+    if (alpha === 0) {
+      setHasBackgroundColorSelection(false);
+      setBackgroundRemovalStatus('点击的位置已经是透明像素，无需再按白色去背景。');
+      return;
+    }
+
     setBackgroundColor(rgbToHex(data[pixelIndex], data[pixelIndex + 1], data[pixelIndex + 2]));
+    setHasBackgroundColorSelection(true);
     setBackgroundRemovalStatus('已取色，可根据预览调节容差后应用去背景。');
   }
 
   function handleApplyBackgroundRemoval() {
     if (!image) {
+      return;
+    }
+
+    if (!hasBackgroundColorSelection) {
+      setBackgroundRemovalStatus('请先点击一个不透明的背景像素取色。');
       return;
     }
 
@@ -768,7 +892,7 @@ function App() {
     );
 
     if (removedBackground.transparentPixelCount === 0) {
-      setBackgroundRemovalStatus('没有找到匹配的背景像素，请重新取色或调高容差。');
+      setBackgroundRemovalStatus('没有找到匹配的不透明背景像素，请重新取色或调高容差。');
       return;
     }
 
@@ -795,11 +919,9 @@ function App() {
 
     imageDataRef.current = erased.imageData;
 
-    const previewImageData = removeMatchingBackground(
-      erased.imageData,
-      backgroundColor,
-      backgroundTolerance,
-    ).imageData;
+    const previewImageData = hasBackgroundColorSelection
+      ? removeMatchingBackground(erased.imageData, backgroundColor, backgroundTolerance).imageData
+      : erased.imageData;
     if (canvasRef.current) {
       renderScaledImageDataToCanvas(canvasRef.current, previewImageData, scale);
     }
@@ -1048,19 +1170,40 @@ function App() {
 
       <section className="panel preview-panel">
         <div className="toolbar">
-          <div>
-            <p className="label">缩放</p>
-            <strong>{scale}x</strong>
-          </div>
-          <input
-            type="range"
-            min={MIN_SCALE}
-            max={MAX_SCALE}
-            step="1"
-            value={scale}
-            onChange={(event) => setScale(Number(event.target.value))}
-            aria-label="预览缩放"
-          />
+          <label className="toolbar-control toolbar-control--range">
+            <span>
+              <span className="label">预览缩放</span>
+              <strong>{scale}x</strong>
+            </span>
+            <input
+              type="range"
+              min={MIN_SCALE}
+              max={MAX_SCALE}
+              step="1"
+              value={scale}
+              onChange={(event) => setScale(Number(event.target.value))}
+              aria-label="预览缩放"
+            />
+          </label>
+
+          <label className="toolbar-control toolbar-control--select">
+            <span>
+              <span className="label">处理分辨率</span>
+              <strong>{formatResolutionScale(resolutionScale)}</strong>
+            </span>
+            <select
+              value={String(resolutionScale)}
+              onChange={(event) => handleResolutionScaleChange(event.target.value)}
+              disabled={!image}
+              aria-label="处理分辨率"
+            >
+              {RESOLUTION_SCALE_OPTIONS.map((resolutionScaleOption) => (
+                <option key={resolutionScaleOption} value={resolutionScaleOption}>
+                  {formatResolutionScale(resolutionScaleOption)}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
 
         <section className="background-workflow" aria-label="去背景流程">
@@ -1104,7 +1247,10 @@ function App() {
               <input
                 type="color"
                 value={backgroundColor}
-                onChange={(event) => setBackgroundColor(event.target.value)}
+                onChange={(event) => {
+                  setBackgroundColor(event.target.value);
+                  setHasBackgroundColorSelection(true);
+                }}
                 aria-label="待去除背景色"
               />
             </label>
@@ -1156,11 +1302,15 @@ function App() {
               type="button"
               className="tool-button background-apply-button"
               onClick={handleApplyBackgroundRemoval}
-              disabled={!image || backgroundTransparentPixelCount === 0}
+              disabled={
+                !image || !hasBackgroundColorSelection || backgroundTransparentPixelCount === 0
+              }
             >
               {!image
                 ? '先导入图片'
-                : backgroundTransparentPixelCount === 0
+                : !hasBackgroundColorSelection
+                  ? '先取不透明背景色'
+                  : backgroundTransparentPixelCount === 0
                   ? '无可应用像素'
                   : `应用为透明（${backgroundTransparentPixelCount} 像素）`}
             </button>
@@ -1231,8 +1381,9 @@ function App() {
 
         {image ? (
           <p className="meta">
-            {image.name} · 原始尺寸 {image.width} × {image.height}px · canvas 显示尺寸{' '}
-            {image.width * scale} × {image.height * scale}px · 预计可透明化{' '}
+            {image.name} · 导入尺寸 {image.originalWidth} × {image.originalHeight}px · 处理尺寸{' '}
+            {image.width} × {image.height}px · canvas 显示尺寸 {image.width * scale} ×{' '}
+            {image.height * scale}px · 预计可透明化{' '}
             {backgroundTransparentPixelCount} 个像素 · 当前图片透明像素{' '}
             {currentTransparentPixelCount} 个
           </p>

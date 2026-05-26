@@ -132,8 +132,28 @@ h1 {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 20px;
   padding-bottom: 18px;
+}
+
+.toolbar-control {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 56px;
+  padding: 10px 12px;
+  border: 1px solid rgba(244, 234, 213, 0.14);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.toolbar-control--range {
+  flex: 1 1 360px;
+}
+
+.toolbar-control--select {
+  flex: 0 1 280px;
 }
 
 .toolbar strong {
@@ -142,9 +162,23 @@ h1 {
   font-size: 1.5rem;
 }
 
-.toolbar input {
+.toolbar-control input {
   width: min(320px, 50%);
   accent-color: #e5b779;
+}
+
+.toolbar-control select {
+  min-width: 112px;
+  min-height: 40px;
+  padding: 8px 10px;
+  border: 1px solid rgba(244, 234, 213, 0.24);
+  color: #f4ead5;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.toolbar-control select:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 .background-workflow {
