@@ -372,7 +372,8 @@ h1 {
 .crop-panel,
 .background-workflow,
 .pixel-cleanup-panel,
-.pixel-normalize-panel {
+.pixel-normalize-panel,
+.video-extraction-panel {
   position: relative;
   z-index: 20;
   padding: 16px;
@@ -383,7 +384,8 @@ h1 {
 .crop-panel__header,
 .background-workflow__header,
 .pixel-cleanup-panel__header,
-.pixel-normalize-panel__header {
+.pixel-normalize-panel__header,
+.video-extraction-panel__header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -394,7 +396,8 @@ h1 {
 .crop-panel__header h2,
 .background-workflow__header h2,
 .pixel-cleanup-panel__header h2,
-.pixel-normalize-panel__header h2 {
+.pixel-normalize-panel__header h2,
+.video-extraction-panel__header h2 {
   margin: 6px 0 0;
   font-size: clamp(1.5rem, 3vw, 2.2rem);
 }
@@ -402,7 +405,8 @@ h1 {
 .crop-panel__summary,
 .background-workflow__summary,
 .pixel-cleanup-panel__summary,
-.pixel-normalize-panel__summary {
+.pixel-normalize-panel__summary,
+.video-extraction-panel__summary {
   max-width: 260px;
   margin: 0;
   color: #d8c9ad;
@@ -412,9 +416,15 @@ h1 {
 
 .crop-controls {
   display: grid;
-  grid-template-columns: repeat(4, minmax(130px, 1fr)) minmax(160px, 0.9fr);
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 12px;
   padding: 0;
+}
+
+.video-extraction-controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
 }
 
 .background-steps {
@@ -1059,7 +1069,7 @@ h1 {
 
 .export-controls {
   display: grid;
-  grid-template-columns: repeat(2, minmax(180px, 1fr)) minmax(220px, 280px);
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 12px;
   margin-top: 14px;
 }
@@ -1129,7 +1139,8 @@ h1 {
   .crop-panel__summary,
   .background-workflow__summary,
   .pixel-cleanup-panel__summary,
-  .pixel-normalize-panel__summary {
+  .pixel-normalize-panel__summary,
+  .video-extraction-panel__summary {
     max-width: 220px;
   }
 
@@ -1220,7 +1231,8 @@ h1 {
   .background-workflow__header,
   .common-tools__header,
   .pixel-cleanup-panel__header,
-  .pixel-normalize-panel__header {
+  .pixel-normalize-panel__header,
+  .video-extraction-panel__header {
     flex-direction: column;
   }
 
@@ -1228,7 +1240,8 @@ h1 {
   .background-workflow__summary,
   .common-tools__summary,
   .pixel-cleanup-panel__summary,
-  .pixel-normalize-panel__summary {
+  .pixel-normalize-panel__summary,
+  .video-extraction-panel__summary {
     max-width: none;
     text-align: left;
   }

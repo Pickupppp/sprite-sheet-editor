@@ -1,4 +1,5 @@
 import {
+  DEFAULT_VIDEO_FRAME_COUNT,
   DEFAULT_RESOLUTION_SCALE,
   MAX_VIDEO_FRAME_COUNT,
   MAX_VIDEO_SPRITE_SHEET_WIDTH,
@@ -13,7 +14,9 @@ import type {
   ResolutionScale,
   RgbColor,
   SpriteFrame,
+  VideoExtractionOptions,
 } from './types';
+import { GIFEncoder, applyPalette, quantize } from 'gifenc';
 
 export function hexToRgb(hexColor: string): RgbColor {
   const normalizedColor = hexColor.replace('#', '');
@@ -96,7 +99,35 @@ export function seekVideoTo(video: HTMLVideoElement, timestamp: number) {
   });
 }
 
-export async function readVideoSpriteSheetImageData(file: File) {
+function clampVideoExtractionOptions(
+  options: Partial<VideoExtractionOptions> | undefined,
+  duration: number,
+  maxFrameCountByCanvasWidth: number,
+): VideoExtractionOptions {
+  const requestedFrameCount = Math.round(options?.frameCount ?? DEFAULT_VIDEO_FRAME_COUNT);
+  const frameCount = Math.max(
+    1,
+    Math.min(MAX_VIDEO_FRAME_COUNT, maxFrameCountByCanvasWidth, requestedFrameCount),
+  );
+  const safeDuration = Number.isFinite(duration) && duration > 0 ? duration : 0;
+  const startTime = Math.max(0, Math.min(options?.startTime ?? 0, Math.max(0, safeDuration - 0.001)));
+  const requestedEndTime = options?.endTime ?? safeDuration;
+  const endTime = Math.max(
+    startTime,
+    Math.min(requestedEndTime, safeDuration > 0 ? safeDuration : startTime),
+  );
+
+  return {
+    frameCount,
+    startTime,
+    endTime,
+  };
+}
+
+export async function readVideoSpriteSheetImageData(
+  file: File,
+  options?: Partial<VideoExtractionOptions>,
+) {
   const objectUrl = URL.createObjectURL(file);
   const video = document.createElement('video');
   video.muted = true;
@@ -124,8 +155,12 @@ export async function readVideoSpriteSheetImageData(file: File) {
       1,
       Math.floor(MAX_VIDEO_SPRITE_SHEET_WIDTH / frameWidth),
     );
-    const extractedFrameCount =
-      duration > 0 ? Math.min(MAX_VIDEO_FRAME_COUNT, maxFrameCountByCanvasWidth) : 1;
+    const extractionOptions = clampVideoExtractionOptions(
+      options,
+      duration,
+      maxFrameCountByCanvasWidth,
+    );
+    const extractedFrameCount = duration > 0 ? extractionOptions.frameCount : 1;
     const spriteCanvas = document.createElement('canvas');
     spriteCanvas.width = frameWidth * extractedFrameCount;
     spriteCanvas.height = frameHeight;
@@ -139,9 +174,16 @@ export async function readVideoSpriteSheetImageData(file: File) {
     spriteContext.clearRect(0, 0, spriteCanvas.width, spriteCanvas.height);
 
     for (let frameIndex = 0; frameIndex < extractedFrameCount; frameIndex += 1) {
+      const extractionDuration = Math.max(
+        0,
+        extractionOptions.endTime - extractionOptions.startTime,
+      );
       const timestamp =
         duration > 0
-          ? Math.min(Math.max(duration - 0.001, 0), (duration * frameIndex) / extractedFrameCount)
+          ? Math.min(
+              Math.max(duration - 0.001, 0),
+              extractionOptions.startTime + (extractionDuration * frameIndex) / extractedFrameCount,
+            )
           : 0;
       await seekVideoTo(video, timestamp);
       spriteContext.drawImage(video, frameIndex * frameWidth, 0, frameWidth, frameHeight);
@@ -149,6 +191,7 @@ export async function readVideoSpriteSheetImageData(file: File) {
 
     return {
       duration,
+      extractionOptions,
       extractedFrameCount,
       frameHeight,
       frameWidth,
@@ -396,6 +439,135 @@ export function removeMatchingBackground(
     imageData: new ImageData(pixels, sourceImageData.width, sourceImageData.height),
     transparentPixelCount,
   };
+}
+
+export function removeConnectedBackground(
+  sourceImageData: ImageData,
+  startPoint: CanvasPoint,
+  backgroundColor: string,
+  tolerance: number,
+) {
+  const targetColor = hexToRgb(backgroundColor);
+  const pixels = new Uint8ClampedArray(sourceImageData.data);
+  const visited = new Uint8Array(sourceImageData.width * sourceImageData.height);
+  const stack: CanvasPoint[] = [startPoint];
+  let transparentPixelCount = 0;
+
+  function isMatchingPixel(x: number, y: number) {
+    if (x < 0 || y < 0 || x >= sourceImageData.width || y >= sourceImageData.height) {
+      return false;
+    }
+
+    const pixelOffset = y * sourceImageData.width + x;
+    if (visited[pixelOffset]) {
+      return false;
+    }
+
+    const dataIndex = pixelOffset * 4;
+    return (
+      pixels[dataIndex + 3] > 0 &&
+      Math.abs(pixels[dataIndex] - targetColor.red) <= tolerance &&
+      Math.abs(pixels[dataIndex + 1] - targetColor.green) <= tolerance &&
+      Math.abs(pixels[dataIndex + 2] - targetColor.blue) <= tolerance
+    );
+  }
+
+  while (stack.length > 0) {
+    const point = stack.pop();
+    if (!point || !isMatchingPixel(point.x, point.y)) {
+      continue;
+    }
+
+    const pixelOffset = point.y * sourceImageData.width + point.x;
+    visited[pixelOffset] = 1;
+    pixels[pixelOffset * 4 + 3] = 0;
+    transparentPixelCount += 1;
+
+    stack.push(
+      { x: point.x + 1, y: point.y },
+      { x: point.x - 1, y: point.y },
+      { x: point.x, y: point.y + 1 },
+      { x: point.x, y: point.y - 1 },
+    );
+  }
+
+  return {
+    imageData: new ImageData(pixels, sourceImageData.width, sourceImageData.height),
+    transparentPixelCount,
+  };
+}
+
+export function getTransparentBoundsCropInsets(sourceImageData: ImageData): CropInsets {
+  const bounds = getOpaqueBounds(sourceImageData);
+  if (!bounds) {
+    return createDefaultCropInsets();
+  }
+
+  return sanitizeCropInsets(
+    {
+      top: bounds.minY,
+      right: sourceImageData.width - bounds.maxX - 1,
+      bottom: sourceImageData.height - bounds.maxY - 1,
+      left: bounds.minX,
+    },
+    sourceImageData.width,
+    sourceImageData.height,
+  );
+}
+
+export function getBackgroundBorderCropInsets(
+  sourceImageData: ImageData,
+  backgroundColor: string,
+  tolerance: number,
+): CropInsets {
+  const targetColor = hexToRgb(backgroundColor);
+  const { data, width, height } = sourceImageData;
+
+  function isBackgroundLike(x: number, y: number) {
+    const dataIndex = (y * width + x) * 4;
+    return data[dataIndex + 3] === 0 || getColorDistanceToRgb(data, dataIndex, targetColor) <= tolerance;
+  }
+
+  function isBackgroundRow(y: number, left: number, right: number) {
+    for (let x = left; x <= right; x += 1) {
+      if (!isBackgroundLike(x, y)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  function isBackgroundColumn(x: number, top: number, bottom: number) {
+    for (let y = top; y <= bottom; y += 1) {
+      if (!isBackgroundLike(x, y)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  let top = 0;
+  let bottom = 0;
+  let left = 0;
+  let right = 0;
+
+  while (top < height - 1 && isBackgroundRow(top, 0, width - 1)) {
+    top += 1;
+  }
+
+  while (bottom < height - top - 1 && isBackgroundRow(height - bottom - 1, 0, width - 1)) {
+    bottom += 1;
+  }
+
+  while (left < width - 1 && isBackgroundColumn(left, top, height - bottom - 1)) {
+    left += 1;
+  }
+
+  while (right < width - left - 1 && isBackgroundColumn(width - right - 1, top, height - bottom - 1)) {
+    right += 1;
+  }
+
+  return sanitizeCropInsets({ top, right, bottom, left }, width, height);
 }
 
 export function erasePixelsAlongPath(
@@ -1207,6 +1379,90 @@ export function createExportCanvas(frameRows: SpriteFrame[][], backgroundColor: 
   return exportCanvas;
 }
 
+function createFrameImageDataForGif(
+  frame: SpriteFrame,
+  width: number,
+  height: number,
+  backgroundColor: string | null,
+) {
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  if (!context) {
+    throw new Error('Canvas context is not available.');
+  }
+
+  context.imageSmoothingEnabled = false;
+  context.clearRect(0, 0, width, height);
+
+  if (backgroundColor) {
+    context.fillStyle = backgroundColor;
+    context.fillRect(0, 0, width, height);
+  }
+
+  const frameCanvas = document.createElement('canvas');
+  frameCanvas.width = frame.width;
+  frameCanvas.height = frame.height;
+
+  const frameContext = frameCanvas.getContext('2d');
+  if (!frameContext) {
+    throw new Error('Canvas context is not available.');
+  }
+
+  frameContext.imageSmoothingEnabled = false;
+  frameContext.putImageData(frame.imageData, 0, 0);
+  context.drawImage(
+    frameCanvas,
+    Math.floor((width - frame.width) / 2),
+    Math.floor((height - frame.height) / 2),
+  );
+
+  return context.getImageData(0, 0, width, height);
+}
+
+export function createAnimatedGifBlob(
+  frames: SpriteFrame[],
+  backgroundColor: string | null,
+  delayMs: number,
+) {
+  const width = Math.max(...frames.map((frame) => frame.width));
+  const height = Math.max(...frames.map((frame) => frame.height));
+  const gif = GIFEncoder();
+
+  frames.forEach((frame) => {
+    const frameImageData = createFrameImageDataForGif(frame, width, height, backgroundColor);
+    const hasTransparentPixels = !backgroundColor && countTransparentPixels(frameImageData) > 0;
+    const palette = quantize(frameImageData.data, 256, {
+      format: hasTransparentPixels ? 'rgba4444' : 'rgb565',
+      oneBitAlpha: hasTransparentPixels ? 127 : false,
+    });
+    const transparentIndex = hasTransparentPixels
+      ? Math.max(0, palette.findIndex((color) => color[3] !== undefined && color[3] <= 127))
+      : 0;
+    const index = applyPalette(
+      frameImageData.data,
+      palette,
+      hasTransparentPixels ? 'rgba4444' : 'rgb565',
+    );
+
+    gif.writeFrame(index, width, height, {
+      delay: delayMs,
+      palette,
+      repeat: 0,
+      transparent: hasTransparentPixels,
+      transparentIndex,
+    });
+  });
+
+  gif.finish();
+  const bytes = gif.bytes();
+  const arrayBuffer = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(arrayBuffer).set(bytes);
+  return new Blob([arrayBuffer], { type: 'image/gif' });
+}
+
 export function downloadBlob(blob: Blob, fileName: string) {
   const objectUrl = URL.createObjectURL(blob);
   const link = document.createElement('a');
@@ -1222,6 +1478,12 @@ export function getExportFileName(imageName: string, backgroundMode: ExportBackg
   const modeSuffix = backgroundMode === 'transparent' ? 'transparent' : 'solid-bg';
 
   return `${safeBaseName || 'sprite-sequence'}-${modeSuffix}.png`;
+}
+
+export function getGifExportFileName(imageName: string, rowIndex: number) {
+  const nameWithoutExtension = imageName.replace(/\.[^/.]+$/, '');
+  const safeBaseName = nameWithoutExtension.replace(/[^a-z0-9-_]+/gi, '-').replace(/^-+|-+$/g, '');
+  return `${safeBaseName || 'sprite-sequence'}-row-${rowIndex + 1}.gif`;
 }
 
 export function getCanvasPixelPoint(

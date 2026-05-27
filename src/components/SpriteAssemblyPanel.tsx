@@ -7,6 +7,7 @@ import {
 } from '../constants';
 import type {
   CopiedFrameSource,
+  ExportFormat,
   ExportBackgroundMode,
   FinalSequenceFrame,
   FinalSequenceRow,
@@ -58,6 +59,8 @@ type SpriteAssemblyPanelProps = {
   exportCanvasSize: ExportCanvasSize | null;
   finalSequenceFrameRowsForExport: SpriteFrame[][];
   handleExportFinalSequence: () => void;
+  exportFormat: ExportFormat;
+  setExportFormat: React.Dispatch<React.SetStateAction<ExportFormat>>;
   exportBackgroundMode: ExportBackgroundMode;
   setExportBackgroundMode: React.Dispatch<React.SetStateAction<ExportBackgroundMode>>;
   exportBackgroundColor: string;
@@ -97,6 +100,8 @@ export function SpriteAssemblyPanel({
   exportCanvasSize,
   finalSequenceFrameRowsForExport,
   handleExportFinalSequence,
+  exportFormat,
+  setExportFormat,
   exportBackgroundMode,
   setExportBackgroundMode,
   exportBackgroundColor,
@@ -409,11 +414,33 @@ export function SpriteAssemblyPanel({
                         className="tool-button export-button"
                         onClick={handleExportFinalSequence}
                       >
-                        导出多行 PNG
+                        {exportFormat === 'gif' ? '导出 GIF 动画' : '导出多行 PNG'}
                       </button>
                     </div>
 
                     <div className="export-controls">
+                      <label className="radio-control">
+                        <input
+                          type="radio"
+                          name="export-format"
+                          value="png"
+                          checked={exportFormat === 'png'}
+                          onChange={() => setExportFormat('png')}
+                        />
+                        <span>PNG 长图</span>
+                      </label>
+
+                      <label className="radio-control">
+                        <input
+                          type="radio"
+                          name="export-format"
+                          value="gif"
+                          checked={exportFormat === 'gif'}
+                          onChange={() => setExportFormat('gif')}
+                        />
+                        <span>GIF 动画</span>
+                      </label>
+
                       <label className="radio-control">
                         <input
                           type="radio"
@@ -422,7 +449,7 @@ export function SpriteAssemblyPanel({
                           checked={exportBackgroundMode === 'transparent'}
                           onChange={() => setExportBackgroundMode('transparent')}
                         />
-                        <span>透明背景 PNG</span>
+                        <span>透明背景</span>
                       </label>
 
                       <label className="radio-control">
@@ -433,7 +460,7 @@ export function SpriteAssemblyPanel({
                           checked={exportBackgroundMode === 'solid'}
                           onChange={() => setExportBackgroundMode('solid')}
                         />
-                        <span>填充背景色后导出</span>
+                        <span>填充背景色</span>
                       </label>
 
                       <label className="color-control export-color-control">

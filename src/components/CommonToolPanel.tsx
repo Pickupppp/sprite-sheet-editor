@@ -21,6 +21,12 @@ type CommonToolPanelProps = {
   setIsGridOverlayEnabled: React.Dispatch<React.SetStateAction<boolean>>;
   gridOverlaySize: number;
   setGridOverlaySize: React.Dispatch<React.SetStateAction<number>>;
+  canUndoImageOperation: boolean;
+  canRedoImageOperation: boolean;
+  undoLabel: string | null;
+  redoLabel: string | null;
+  onUndoImageOperation: () => void;
+  onRedoImageOperation: () => void;
 };
 
 export function CommonToolPanel({
@@ -37,6 +43,12 @@ export function CommonToolPanel({
   setIsGridOverlayEnabled,
   gridOverlaySize,
   setGridOverlaySize,
+  canUndoImageOperation,
+  canRedoImageOperation,
+  undoLabel,
+  redoLabel,
+  onUndoImageOperation,
+  onRedoImageOperation,
 }: CommonToolPanelProps) {
   return (
     <section className="common-tools" aria-label="跨步骤预览工具">
@@ -141,6 +153,26 @@ export function CommonToolPanel({
             aria-label="像素辅助网格间距"
           />
         </label>
+
+        <button
+          type="button"
+          className="tool-button"
+          onClick={onUndoImageOperation}
+          disabled={!canUndoImageOperation}
+          title={undoLabel ? `撤销：${undoLabel}` : '没有可撤销的图像操作'}
+        >
+          撤销图像操作
+        </button>
+
+        <button
+          type="button"
+          className="tool-button"
+          onClick={onRedoImageOperation}
+          disabled={!canRedoImageOperation}
+          title={redoLabel ? `重做：${redoLabel}` : '没有可重做的图像操作'}
+        >
+          重做图像操作
+        </button>
       </div>
     </section>
   );

@@ -24,14 +24,18 @@ import {
   DEFAULT_QUANTIZE_COLOR_COUNT,
   DEFAULT_RESOLUTION_SCALE,
   DEFAULT_SNAP_ALPHA_THRESHOLD,
+  DEFAULT_VIDEO_FRAME_COUNT,
+  MAX_IMAGE_HISTORY_ENTRIES,
   MAX_GRID_SIZE,
   MAX_VIDEO_FRAME_COUNT,
   MIN_GRID_SIZE,
+  VIDEO_FRAME_COUNT_OPTIONS,
 } from './constants';
 import {
   alignSpriteFramesBottomCenter,
   clampCropValue,
   cleanPixelNoise,
+  createAnimatedGifBlob,
   countTransparentPixels,
   countUniqueOpaqueColors,
   createDefaultCropInsets,
@@ -45,12 +49,16 @@ import {
   getCanvasPixelPoint,
   getExportCanvasSize,
   getExportFileName,
+  getGifExportFileName,
+  getBackgroundBorderCropInsets,
+  getTransparentBoundsCropInsets,
   parseResolutionScale,
   prepareImageData,
   quantizeColors,
   readBitmapImageData,
   readVideoSpriteSheetImageData,
   removeBackgroundFringe,
+  removeConnectedBackground,
   removeMatchingBackground,
   renderScaledImageDataToCanvas,
   rgbToHex,
@@ -63,12 +71,16 @@ import type {
   CopiedFrameSource,
   CropInsetKey,
   CropInsets,
+  BackgroundRemovalMode,
+  ExportFormat,
   ExportBackgroundMode,
   FinalSequenceFrame,
   FinalSequenceRow,
+  ImageHistoryEntry,
   LoadedImage,
   ResolutionScale,
   SpriteFrame,
+  VideoExtractionOptions,
 } from './types';
 import type { WorkflowStepId } from './workflowSteps';
 
@@ -79,12 +91,25 @@ type PixelNormalizePreview = {
   applyStatus: string;
 };
 
+function cloneImageData(imageData: ImageData) {
+  return new ImageData(new Uint8ClampedArray(imageData.data), imageData.width, imageData.height);
+}
+
+function cloneLoadedImage(image: LoadedImage): LoadedImage {
+  return {
+    ...image,
+    imageData: cloneImageData(image.imageData),
+    sourceImageData: cloneImageData(image.sourceImageData),
+  };
+}
+
 function App() {
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
   const imageDataRef = React.useRef<ImageData | null>(null);
   const sequenceFrameCounterRef = React.useRef(0);
   const sequenceRowCounterRef = React.useRef(1);
   const isErasingRef = React.useRef(false);
+  const isEraserHistoryCapturedRef = React.useRef(false);
   const lastErasePointRef = React.useRef<CanvasPoint | null>(null);
   const [image, setImage] = React.useState<LoadedImage | null>(null);
   const [scale, setScale] = React.useState(2);
@@ -96,6 +121,9 @@ function App() {
   const [brushSize, setBrushSize] = React.useState(DEFAULT_BRUSH_SIZE);
   const [backgroundColor, setBackgroundColor] = React.useState(DEFAULT_BACKGROUND_COLOR);
   const [hasBackgroundColorSelection, setHasBackgroundColorSelection] = React.useState(false);
+  const [backgroundSamplePoint, setBackgroundSamplePoint] = React.useState<CanvasPoint | null>(null);
+  const [backgroundRemovalMode, setBackgroundRemovalMode] =
+    React.useState<BackgroundRemovalMode>('global');
   const [backgroundTolerance, setBackgroundTolerance] = React.useState(
     DEFAULT_BACKGROUND_TOLERANCE,
   );
@@ -116,9 +144,18 @@ function App() {
   const [animationFrameIntervalMs, setAnimationFrameIntervalMs] = React.useState(
     DEFAULT_ANIMATION_FRAME_INTERVAL_MS,
   );
+  const [videoSourceFile, setVideoSourceFile] = React.useState<File | null>(null);
+  const [videoDuration, setVideoDuration] = React.useState(0);
+  const [videoExtractionOptions, setVideoExtractionOptions] =
+    React.useState<VideoExtractionOptions>({
+      frameCount: DEFAULT_VIDEO_FRAME_COUNT,
+      startTime: 0,
+      endTime: 0,
+    });
   const [copiedFrameSource, setCopiedFrameSource] = React.useState<CopiedFrameSource | null>(null);
   const [exportBackgroundMode, setExportBackgroundMode] =
     React.useState<ExportBackgroundMode>('transparent');
+  const [exportFormat, setExportFormat] = React.useState<ExportFormat>('png');
   const [exportBackgroundColor, setExportBackgroundColor] = React.useState(
     DEFAULT_EXPORT_BACKGROUND_COLOR,
   );
@@ -142,6 +179,8 @@ function App() {
   const [exportStatus, setExportStatus] = React.useState('');
   const [error, setError] = React.useState('');
   const [currentStep, setCurrentStep] = React.useState<WorkflowStepId>('import');
+  const [undoStack, setUndoStack] = React.useState<ImageHistoryEntry[]>([]);
+  const [redoStack, setRedoStack] = React.useState<ImageHistoryEntry[]>([]);
 
   const currentTransparentPixelCount = React.useMemo(() => {
     return image ? countTransparentPixels(image.imageData) : 0;
@@ -151,20 +190,45 @@ function App() {
     return image ? countUniqueOpaqueColors(image.imageData) : 0;
   }, [image]);
 
+  function getBackgroundRemovalResult(sourceImageData: ImageData) {
+    if (!hasBackgroundColorSelection) {
+      return {
+        imageData: sourceImageData,
+        transparentPixelCount: 0,
+      };
+    }
+
+    if (backgroundRemovalMode === 'connected') {
+      return backgroundSamplePoint
+        ? removeConnectedBackground(
+            sourceImageData,
+            backgroundSamplePoint,
+            backgroundColor,
+            backgroundTolerance,
+          )
+        : {
+            imageData: sourceImageData,
+            transparentPixelCount: 0,
+          };
+    }
+
+    return removeMatchingBackground(sourceImageData, backgroundColor, backgroundTolerance);
+  }
+
   const processedImageData = React.useMemo(() => {
     if (!image) {
       return null;
     }
 
-    if (!hasBackgroundColorSelection) {
-      return {
-        imageData: image.imageData,
-        transparentPixelCount: 0,
-      };
-    }
-
-    return removeMatchingBackground(image.imageData, backgroundColor, backgroundTolerance);
-  }, [backgroundColor, backgroundTolerance, hasBackgroundColorSelection, image]);
+    return getBackgroundRemovalResult(image.imageData);
+  }, [
+    backgroundColor,
+    backgroundRemovalMode,
+    backgroundSamplePoint,
+    backgroundTolerance,
+    hasBackgroundColorSelection,
+    image,
+  ]);
 
   const previewProcessedImageData = React.useMemo(() => {
     if (!image) {
@@ -173,15 +237,16 @@ function App() {
 
     const previewSourceImageData = pixelNormalizePreview?.imageData ?? image.imageData;
 
-    if (!hasBackgroundColorSelection) {
-      return {
-        imageData: previewSourceImageData,
-        transparentPixelCount: 0,
-      };
-    }
-
-    return removeMatchingBackground(previewSourceImageData, backgroundColor, backgroundTolerance);
-  }, [backgroundColor, backgroundTolerance, hasBackgroundColorSelection, image, pixelNormalizePreview]);
+    return getBackgroundRemovalResult(previewSourceImageData);
+  }, [
+    backgroundColor,
+    backgroundRemovalMode,
+    backgroundSamplePoint,
+    backgroundTolerance,
+    hasBackgroundColorSelection,
+    image,
+    pixelNormalizePreview,
+  ]);
 
   const backgroundTransparentPixelCount = processedImageData?.transparentPixelCount ?? 0;
   const transparentPreviewStyle: React.CSSProperties | undefined = isBackgroundPreviewEnabled
@@ -328,6 +393,81 @@ function App() {
     setPixelNormalizePreview(null);
   }
 
+  function createImageHistoryEntry(label: string): ImageHistoryEntry | null {
+    if (!image) {
+      return null;
+    }
+
+    return {
+      label,
+      image: cloneLoadedImage(image),
+      resolutionScale,
+      cropInsets,
+      backgroundColor,
+      hasBackgroundColorSelection,
+      backgroundSamplePoint,
+    };
+  }
+
+  function pushImageHistory(label: string) {
+    const historyEntry = createImageHistoryEntry(label);
+    if (!historyEntry) {
+      return;
+    }
+
+    setUndoStack((currentStack) => [
+      ...currentStack.slice(Math.max(0, currentStack.length - MAX_IMAGE_HISTORY_ENTRIES + 1)),
+      historyEntry,
+    ]);
+    setRedoStack([]);
+  }
+
+  function restoreImageHistoryEntry(historyEntry: ImageHistoryEntry) {
+    setImage(cloneLoadedImage(historyEntry.image));
+    imageDataRef.current = cloneImageData(historyEntry.image.imageData);
+    setResolutionScale(historyEntry.resolutionScale);
+    setCropInsets(historyEntry.cropInsets);
+    setBackgroundColor(historyEntry.backgroundColor);
+    setHasBackgroundColorSelection(historyEntry.hasBackgroundColorSelection);
+    setBackgroundSamplePoint(historyEntry.backgroundSamplePoint);
+    clearPixelNormalizePreview();
+    resetSequenceAssembly();
+    setBackgroundRemovalStatus(`已恢复到“${historyEntry.label}”之前的图像状态。`);
+    setCropStatus('');
+    clearPixelProcessingStatuses();
+    setExportStatus('');
+  }
+
+  function handleUndoImageOperation() {
+    const previousEntry = undoStack[undoStack.length - 1];
+    const currentEntry = createImageHistoryEntry(previousEntry?.label ?? '撤销前状态');
+    if (!previousEntry || !currentEntry) {
+      return;
+    }
+
+    setUndoStack((currentStack) => currentStack.slice(0, -1));
+    setRedoStack((currentStack) => [
+      ...currentStack.slice(Math.max(0, currentStack.length - MAX_IMAGE_HISTORY_ENTRIES + 1)),
+      currentEntry,
+    ]);
+    restoreImageHistoryEntry(previousEntry);
+  }
+
+  function handleRedoImageOperation() {
+    const nextEntry = redoStack[redoStack.length - 1];
+    const currentEntry = createImageHistoryEntry(nextEntry?.label ?? '重做前状态');
+    if (!nextEntry || !currentEntry) {
+      return;
+    }
+
+    setRedoStack((currentStack) => currentStack.slice(0, -1));
+    setUndoStack((currentStack) => [
+      ...currentStack.slice(Math.max(0, currentStack.length - MAX_IMAGE_HISTORY_ENTRIES + 1)),
+      currentEntry,
+    ]);
+    restoreImageHistoryEntry(nextEntry);
+  }
+
   function applyPreparedImage(currentImage: LoadedImage, preparedImage: ReturnType<typeof prepareImageData>) {
     setCropInsets(preparedImage.cropInsets);
     setImage({
@@ -338,6 +478,7 @@ function App() {
     });
     resetSequenceAssembly();
     setHasBackgroundColorSelection(false);
+    setBackgroundSamplePoint(null);
     clearPixelNormalizePreview();
   }
 
@@ -387,7 +528,11 @@ function App() {
       let sourceFrameHeight: number | undefined;
 
       if (isVideoFile) {
-        const videoSpriteSheet = await readVideoSpriteSheetImageData(file);
+        const videoSpriteSheet = await readVideoSpriteSheetImageData(file, {
+          frameCount: DEFAULT_VIDEO_FRAME_COUNT,
+          startTime: 0,
+          endTime: Number.POSITIVE_INFINITY,
+        });
         sourceImageData = videoSpriteSheet.imageData;
         originalWidth = videoSpriteSheet.imageData.width;
         originalHeight = videoSpriteSheet.imageData.height;
@@ -395,6 +540,9 @@ function App() {
         extractedFrameCount = videoSpriteSheet.extractedFrameCount;
         sourceFrameWidth = videoSpriteSheet.frameWidth;
         sourceFrameHeight = videoSpriteSheet.frameHeight;
+        setVideoSourceFile(file);
+        setVideoDuration(videoSpriteSheet.duration);
+        setVideoExtractionOptions(videoSpriteSheet.extractionOptions);
       } else {
         const bitmap = await createImageBitmap(file);
         sourceImageData = readBitmapImageData(bitmap);
@@ -402,6 +550,13 @@ function App() {
         originalHeight = bitmap.height;
         sourceType = 'image';
         bitmap.close();
+        setVideoSourceFile(null);
+        setVideoDuration(0);
+        setVideoExtractionOptions({
+          frameCount: DEFAULT_VIDEO_FRAME_COUNT,
+          startTime: 0,
+          endTime: 0,
+        });
       }
 
       const defaultCropInsets = createDefaultCropInsets();
@@ -428,7 +583,10 @@ function App() {
       setGridRows(sourceType === 'video' ? 1 : DEFAULT_GRID_ROWS);
       setGridColumns(extractedFrameCount ?? DEFAULT_GRID_COLUMNS);
       resetSequenceAssembly();
+      setUndoStack([]);
+      setRedoStack([]);
       setHasBackgroundColorSelection(false);
+      setBackgroundSamplePoint(null);
       setBackgroundRemovalStatus('');
       setCropStatus('');
       clearPixelProcessingStatuses();
@@ -465,6 +623,7 @@ function App() {
         nextResolutionScale,
         nextCropInsets,
       );
+      pushImageHistory('调整处理分辨率');
       setResolutionScale(nextResolutionScale);
       applyPreparedImage(image, preparedImage);
       setBackgroundRemovalStatus(
@@ -477,6 +636,61 @@ function App() {
       setExportStatus('');
     } catch {
       setError('调整处理分辨率失败，当前浏览器无法重新采样图片。');
+    }
+  }
+
+  async function handleReextractVideoFrames() {
+    if (!image || !videoSourceFile || image.sourceType !== 'video') {
+      return;
+    }
+
+    try {
+      setImportStatus('正在按当前设置重新抽取视频帧...');
+      const videoSpriteSheet = await readVideoSpriteSheetImageData(
+        videoSourceFile,
+        videoExtractionOptions,
+      );
+      const defaultCropInsets = createDefaultCropInsets();
+      const preparedImage = prepareImageData(
+        videoSpriteSheet.imageData,
+        DEFAULT_RESOLUTION_SCALE,
+        defaultCropInsets,
+      );
+
+      pushImageHistory('重新抽取视频帧');
+      setImage({
+        ...image,
+        imageData: preparedImage.imageData,
+        sourceImageData: videoSpriteSheet.imageData,
+        width: preparedImage.imageData.width,
+        height: preparedImage.imageData.height,
+        originalWidth: videoSpriteSheet.imageData.width,
+        originalHeight: videoSpriteSheet.imageData.height,
+        extractedFrameCount: videoSpriteSheet.extractedFrameCount,
+        sourceFrameWidth: videoSpriteSheet.frameWidth,
+        sourceFrameHeight: videoSpriteSheet.frameHeight,
+      });
+      imageDataRef.current = preparedImage.imageData;
+      setResolutionScale(DEFAULT_RESOLUTION_SCALE);
+      setCropInsets(preparedImage.cropInsets);
+      setVideoDuration(videoSpriteSheet.duration);
+      setVideoExtractionOptions(videoSpriteSheet.extractionOptions);
+      setGridRows(1);
+      setGridColumns(videoSpriteSheet.extractedFrameCount);
+      resetSequenceAssembly();
+      setHasBackgroundColorSelection(false);
+      setBackgroundSamplePoint(null);
+      setBackgroundRemovalStatus('');
+      setCropStatus('');
+      clearPixelProcessingStatuses();
+      clearPixelNormalizePreview();
+      setImportStatus(
+        `已重新抽取 ${videoSpriteSheet.extractedFrameCount} 帧，并组合为 ${preparedImage.imageData.width} × ${preparedImage.imageData.height}px 单行长图。`,
+      );
+      setExportStatus('');
+    } catch {
+      setImportStatus('');
+      setError('重新抽帧失败，请检查起止时间或换一个浏览器支持的视频重试。');
     }
   }
 
@@ -496,6 +710,7 @@ function App() {
         resolutionScale,
         nextCropInsets,
       );
+      pushImageHistory('手动裁剪');
       applyPreparedImage(image, preparedImage);
       setBackgroundRemovalStatus('');
       setCropStatus(
@@ -520,6 +735,7 @@ function App() {
         resolutionScale,
         defaultCropInsets,
       );
+      pushImageHistory('重置裁剪');
       applyPreparedImage(image, preparedImage);
       setBackgroundRemovalStatus('');
       setCropStatus('已清除裁剪，恢复当前处理分辨率下的完整画布。');
@@ -528,6 +744,77 @@ function App() {
     } catch {
       setError('重置裁剪失败，当前浏览器无法重新生成图片。');
     }
+  }
+
+  function applyCurrentImageCrop(nextCropInsets: CropInsets, label: string, emptyStatus: string) {
+    if (!image) {
+      return;
+    }
+
+    if (
+      nextCropInsets.top === 0 &&
+      nextCropInsets.right === 0 &&
+      nextCropInsets.bottom === 0 &&
+      nextCropInsets.left === 0
+    ) {
+      setCropStatus(emptyStatus);
+      return;
+    }
+
+    try {
+      const cropped = prepareImageData(image.imageData, DEFAULT_RESOLUTION_SCALE, nextCropInsets);
+      pushImageHistory(label);
+      const nextImage = {
+        ...image,
+        imageData: cropped.imageData,
+        sourceImageData: cloneImageData(cropped.imageData),
+        width: cropped.imageData.width,
+        height: cropped.imageData.height,
+      };
+      setImage(nextImage);
+      imageDataRef.current = nextImage.imageData;
+      setResolutionScale(DEFAULT_RESOLUTION_SCALE);
+      setCropInsets(createDefaultCropInsets());
+      resetSequenceAssembly();
+      setHasBackgroundColorSelection(false);
+      setBackgroundSamplePoint(null);
+      setBackgroundRemovalStatus('');
+      setCropStatus(`已裁剪为 ${cropped.imageData.width} × ${cropped.imageData.height}px，并设为新的处理基准。`);
+      clearPixelProcessingStatuses();
+      clearPixelNormalizePreview();
+      setExportStatus('');
+    } catch {
+      setError('自动裁剪失败，当前浏览器无法重新生成图片。');
+    }
+  }
+
+  function handleAutoCropTransparentEdges() {
+    if (!image) {
+      return;
+    }
+
+    applyCurrentImageCrop(
+      getTransparentBoundsCropInsets(image.imageData),
+      '一键裁透明边',
+      '当前图片四周没有可裁掉的透明边。',
+    );
+  }
+
+  function handleAutoCropBackgroundEdges() {
+    if (!image) {
+      return;
+    }
+
+    if (!hasBackgroundColorSelection) {
+      setCropStatus('请先在“去背景色”步骤取背景色，再一键裁背景色边。');
+      return;
+    }
+
+    applyCurrentImageCrop(
+      getBackgroundBorderCropInsets(image.imageData, backgroundColor, backgroundTolerance),
+      '一键裁背景色边',
+      '当前图片四周没有符合当前背景色和容差的可裁区域。',
+    );
   }
 
   function handleCanvasPick(event: React.MouseEvent<HTMLCanvasElement>) {
@@ -546,12 +833,14 @@ function App() {
 
     if (alpha === 0) {
       setHasBackgroundColorSelection(false);
+      setBackgroundSamplePoint(null);
       setBackgroundRemovalStatus('点击的位置已经是透明像素，无需再按白色去背景。');
       return;
     }
 
     setBackgroundColor(rgbToHex(data[pixelIndex], data[pixelIndex + 1], data[pixelIndex + 2]));
     setHasBackgroundColorSelection(true);
+    setBackgroundSamplePoint(point);
     setBackgroundRemovalStatus('已取色，可根据预览调节容差后应用去背景。');
   }
 
@@ -565,17 +854,14 @@ function App() {
       return;
     }
 
-    const removedBackground = removeMatchingBackground(
-      image.imageData,
-      backgroundColor,
-      backgroundTolerance,
-    );
+    const removedBackground = getBackgroundRemovalResult(image.imageData);
 
     if (removedBackground.transparentPixelCount === 0) {
       setBackgroundRemovalStatus('没有找到匹配的不透明背景像素，请重新取色或调高容差。');
       return;
     }
 
+    pushImageHistory(backgroundRemovalMode === 'connected' ? '魔棒连通去背景' : '全图容差去背景');
     updateCurrentImageData(removedBackground.imageData, false);
     setBackgroundRemovalStatus(
       `已将 ${removedBackground.transparentPixelCount} 个背景像素变为透明。`,
@@ -600,6 +886,7 @@ function App() {
       return;
     }
 
+    pushImageHistory('自动去毛刺');
     updateCurrentImageData(cleaned.imageData);
     setPixelCleanupStatus(`已清理 ${cleaned.removedPixelCount} 个疑似毛刺/小杂色像素。`);
     setExportStatus('');
@@ -628,6 +915,7 @@ function App() {
       return;
     }
 
+    pushImageHistory('去背景色边');
     updateCurrentImageData(defringed.imageData);
     setPixelCleanupStatus(
       `已处理背景色边：透明化 ${defringed.transparentPixelCount} 个像素，重染 ${defringed.recoloredPixelCount} 个边缘像素。`,
@@ -646,6 +934,7 @@ function App() {
       return;
     }
 
+    pushImageHistory('按帧底部居中对齐');
     updateCurrentImageData(aligned.imageData);
     setPixelCleanupStatus(
       `已按当前 ${gridRows} × ${gridColumns} 切分配置，对齐 ${aligned.alignedFrameCount} 个非空帧。`,
@@ -710,6 +999,7 @@ function App() {
     }
 
     const applyStatus = pixelNormalizePreview.applyStatus;
+    pushImageHistory(pixelNormalizePreview.kind === 'snap' ? '确认网格对齐预览' : '确认色彩量化预览');
     updateCurrentImageData(pixelNormalizePreview.imageData);
     setPixelCleanupStatus('');
     setPixelNormalizeStatus(applyStatus);
@@ -739,9 +1029,7 @@ function App() {
 
     imageDataRef.current = erased.imageData;
 
-    const previewImageData = hasBackgroundColorSelection
-      ? removeMatchingBackground(erased.imageData, backgroundColor, backgroundTolerance).imageData
-      : erased.imageData;
+    const previewImageData = getBackgroundRemovalResult(erased.imageData).imageData;
     if (canvasRef.current) {
       renderScaledImageDataToCanvas(canvasRef.current, previewImageData, scale);
       if (isGridOverlayEnabled) {
@@ -772,6 +1060,10 @@ function App() {
     event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
     isErasingRef.current = true;
+    if (!isEraserHistoryCapturedRef.current) {
+      pushImageHistory('橡皮擦擦除');
+      isEraserHistoryCapturedRef.current = true;
+    }
     lastErasePointRef.current = point;
     applyEraser(point, point);
   }
@@ -797,6 +1089,7 @@ function App() {
     }
 
     isErasingRef.current = false;
+    isEraserHistoryCapturedRef.current = false;
     lastErasePointRef.current = null;
   }
 
@@ -947,6 +1240,21 @@ function App() {
     }
 
     try {
+      if (exportFormat === 'gif') {
+        finalSequenceFrameRowsForExport.forEach((frames, rowIndex) => {
+          const gifBlob = createAnimatedGifBlob(
+            frames,
+            exportBackgroundMode === 'solid' ? exportBackgroundColor : null,
+            animationFrameIntervalMs,
+          );
+          downloadBlob(gifBlob, getGifExportFileName(image.name, rowIndex));
+        });
+        setExportStatus(
+          `已导出 ${finalSequenceFrameRowsForExport.length} 个 GIF 动画文件，帧间隔 ${animationFrameIntervalMs}ms。`,
+        );
+        return;
+      }
+
       const exportCanvas = createExportCanvas(
         finalSequenceFrameRowsForExport,
         exportBackgroundMode === 'solid' ? exportBackgroundColor : null,
@@ -1037,6 +1345,12 @@ function App() {
             setIsGridOverlayEnabled={setIsGridOverlayEnabled}
             gridOverlaySize={gridOverlaySize}
             setGridOverlaySize={setGridOverlaySize}
+            canUndoImageOperation={undoStack.length > 0}
+            canRedoImageOperation={redoStack.length > 0}
+            undoLabel={undoStack[undoStack.length - 1]?.label ?? null}
+            redoLabel={redoStack[redoStack.length - 1]?.label ?? null}
+            onUndoImageOperation={handleUndoImageOperation}
+            onRedoImageOperation={handleRedoImageOperation}
             pixelCleanupStatus={pixelCleanupStatus}
             currentUniqueColorCount={currentUniqueColorCount}
             pixelBlockSize={pixelBlockSize}
@@ -1055,6 +1369,16 @@ function App() {
             brushSize={brushSize}
             setBrushSize={setBrushSize}
             setIsEraserMode={setIsEraserMode}
+            handleAutoCropTransparentEdges={handleAutoCropTransparentEdges}
+            handleAutoCropBackgroundEdges={handleAutoCropBackgroundEdges}
+            backgroundRemovalMode={backgroundRemovalMode}
+            setBackgroundRemovalMode={setBackgroundRemovalMode}
+            hasConnectedBackgroundPoint={Boolean(backgroundSamplePoint)}
+            videoDuration={videoDuration}
+            videoExtractionOptions={videoExtractionOptions}
+            setVideoExtractionOptions={setVideoExtractionOptions}
+            handleReextractVideoFrames={handleReextractVideoFrames}
+            importStatus={importStatus}
           />
         ) : null}
 
@@ -1091,6 +1415,8 @@ function App() {
             exportCanvasSize={exportCanvasSize}
             finalSequenceFrameRowsForExport={finalSequenceFrameRowsForExport}
             handleExportFinalSequence={handleExportFinalSequence}
+            exportFormat={exportFormat}
+            setExportFormat={setExportFormat}
             exportBackgroundMode={exportBackgroundMode}
             setExportBackgroundMode={setExportBackgroundMode}
             exportBackgroundColor={exportBackgroundColor}

@@ -8,8 +8,16 @@ import {
   MIN_BRUSH_SIZE,
   MIN_PIXEL_BLOCK_SIZE,
   MIN_QUANTIZE_COLOR_COUNT,
+  VIDEO_FRAME_COUNT_OPTIONS,
 } from '../constants';
-import type { CropInsetKey, CropInsets, LoadedImage, ResolutionScale } from '../types';
+import type {
+  BackgroundRemovalMode,
+  CropInsetKey,
+  CropInsets,
+  LoadedImage,
+  ResolutionScale,
+  VideoExtractionOptions,
+} from '../types';
 import type { WorkflowStepId } from '../workflowSteps';
 import { CanvasPreviewPanel } from './CanvasPreviewPanel';
 import { CommonToolPanel } from './CommonToolPanel';
@@ -70,6 +78,12 @@ type MainControlPanelProps = {
   setIsGridOverlayEnabled: React.Dispatch<React.SetStateAction<boolean>>;
   gridOverlaySize: number;
   setGridOverlaySize: React.Dispatch<React.SetStateAction<number>>;
+  canUndoImageOperation: boolean;
+  canRedoImageOperation: boolean;
+  undoLabel: string | null;
+  redoLabel: string | null;
+  onUndoImageOperation: () => void;
+  onRedoImageOperation: () => void;
   pixelCleanupStatus: string;
   currentUniqueColorCount: number;
   pixelBlockSize: number;
@@ -88,6 +102,16 @@ type MainControlPanelProps = {
   brushSize: number;
   setBrushSize: React.Dispatch<React.SetStateAction<number>>;
   setIsEraserMode: React.Dispatch<React.SetStateAction<boolean>>;
+  handleAutoCropTransparentEdges: () => void;
+  handleAutoCropBackgroundEdges: () => void;
+  backgroundRemovalMode: BackgroundRemovalMode;
+  setBackgroundRemovalMode: React.Dispatch<React.SetStateAction<BackgroundRemovalMode>>;
+  hasConnectedBackgroundPoint: boolean;
+  videoDuration: number;
+  videoExtractionOptions: VideoExtractionOptions;
+  setVideoExtractionOptions: React.Dispatch<React.SetStateAction<VideoExtractionOptions>>;
+  handleReextractVideoFrames: () => void;
+  importStatus: string;
 };
 
 export function MainControlPanel({
@@ -141,6 +165,12 @@ export function MainControlPanel({
   setIsGridOverlayEnabled,
   gridOverlaySize,
   setGridOverlaySize,
+  canUndoImageOperation,
+  canRedoImageOperation,
+  undoLabel,
+  redoLabel,
+  onUndoImageOperation,
+  onRedoImageOperation,
   pixelCleanupStatus,
   currentUniqueColorCount,
   pixelBlockSize,
@@ -159,6 +189,16 @@ export function MainControlPanel({
   brushSize,
   setBrushSize,
   setIsEraserMode,
+  handleAutoCropTransparentEdges,
+  handleAutoCropBackgroundEdges,
+  backgroundRemovalMode,
+  setBackgroundRemovalMode,
+  hasConnectedBackgroundPoint,
+  videoDuration,
+  videoExtractionOptions,
+  setVideoExtractionOptions,
+  handleReextractVideoFrames,
+  importStatus,
 }: MainControlPanelProps) {
   return (
       <section className="panel preview-panel">
@@ -176,6 +216,12 @@ export function MainControlPanel({
           setIsGridOverlayEnabled={setIsGridOverlayEnabled}
           gridOverlaySize={gridOverlaySize}
           setGridOverlaySize={setGridOverlaySize}
+          canUndoImageOperation={canUndoImageOperation}
+          canRedoImageOperation={canRedoImageOperation}
+          undoLabel={undoLabel}
+          redoLabel={redoLabel}
+          onUndoImageOperation={onUndoImageOperation}
+          onRedoImageOperation={onRedoImageOperation}
         />
 
         <CanvasPreviewPanel
@@ -191,6 +237,99 @@ export function MainControlPanel({
           backgroundTransparentPixelCount={backgroundTransparentPixelCount}
           currentTransparentPixelCount={currentTransparentPixelCount}
         />
+
+        {image?.sourceType === 'video' ? (
+          <section className="video-extraction-panel" aria-label="视频抽帧设置">
+            <div className="video-extraction-panel__header">
+              <div>
+                <p className="eyebrow">Video Frames</p>
+                <h2>视频抽帧设置</h2>
+              </div>
+              <p className="video-extraction-panel__summary">
+                {image.extractedFrameCount
+                  ? `当前 ${image.extractedFrameCount} 帧，单帧 ${image.sourceFrameWidth} × ${image.sourceFrameHeight}px`
+                  : '调整帧数和起止时间后可重新生成单行长图'}
+              </p>
+            </div>
+
+            <div className="video-extraction-controls">
+              <label className="toolbar-control toolbar-control--select">
+                <span>
+                  <span className="label">抽帧数量</span>
+                  <strong>{videoExtractionOptions.frameCount}</strong>
+                </span>
+                <select
+                  value={videoExtractionOptions.frameCount}
+                  onChange={(event) =>
+                    setVideoExtractionOptions((currentOptions) => ({
+                      ...currentOptions,
+                      frameCount: Number(event.target.value),
+                    }))
+                  }
+                  aria-label="视频抽帧数量"
+                >
+                  {VIDEO_FRAME_COUNT_OPTIONS.map((frameCountOption) => (
+                    <option key={frameCountOption} value={frameCountOption}>
+                      {frameCountOption} 帧
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="number-control">
+                <span>
+                  <span className="label">起始秒</span>
+                  <strong>{videoExtractionOptions.startTime.toFixed(2)}s</strong>
+                </span>
+                <input
+                  type="number"
+                  min="0"
+                  max={Math.max(0, videoExtractionOptions.endTime - 0.01)}
+                  step="0.1"
+                  value={Number(videoExtractionOptions.startTime.toFixed(2))}
+                  onChange={(event) =>
+                    setVideoExtractionOptions((currentOptions) => ({
+                      ...currentOptions,
+                      startTime: Math.max(0, Number(event.target.value) || 0),
+                    }))
+                  }
+                  aria-label="视频抽帧起始秒"
+                />
+              </label>
+
+              <label className="number-control">
+                <span>
+                  <span className="label">结束秒</span>
+                  <strong>{videoExtractionOptions.endTime.toFixed(2)}s</strong>
+                </span>
+                <input
+                  type="number"
+                  min={videoExtractionOptions.startTime}
+                  max={videoDuration || videoExtractionOptions.endTime}
+                  step="0.1"
+                  value={Number(videoExtractionOptions.endTime.toFixed(2))}
+                  onChange={(event) =>
+                    setVideoExtractionOptions((currentOptions) => ({
+                      ...currentOptions,
+                      endTime: Math.max(currentOptions.startTime, Number(event.target.value) || 0),
+                    }))
+                  }
+                  aria-label="视频抽帧结束秒"
+                />
+              </label>
+
+              <button
+                type="button"
+                className="tool-button"
+                onClick={handleReextractVideoFrames}
+              >
+                重新抽帧
+              </button>
+            </div>
+            {importStatus ? <p className="import-status">{importStatus}</p> : null}
+          </section>
+        ) : null}
+
         {currentStep === 'cleanup' ? (
         <section className="crop-panel" aria-label="裁剪周围区域">
           <div className="crop-panel__header">
@@ -300,6 +439,24 @@ export function MainControlPanel({
             >
               重置裁剪
             </button>
+
+            <button
+              type="button"
+              className="tool-button crop-reset-button"
+              onClick={handleAutoCropTransparentEdges}
+              disabled={!image}
+            >
+              一键裁透明边
+            </button>
+
+            <button
+              type="button"
+              className="tool-button crop-reset-button"
+              onClick={handleAutoCropBackgroundEdges}
+              disabled={!image || !hasBackgroundColorSelection}
+            >
+              一键裁背景色边
+            </button>
           </div>
 
           <p className="hint">
@@ -347,6 +504,28 @@ export function MainControlPanel({
           </ol>
 
           <div className="background-controls" aria-label="背景色处理设置">
+            <label className="radio-control">
+              <input
+                type="radio"
+                name="background-removal-mode"
+                value="global"
+                checked={backgroundRemovalMode === 'global'}
+                onChange={() => setBackgroundRemovalMode('global')}
+              />
+              <span>全图容差</span>
+            </label>
+
+            <label className="radio-control">
+              <input
+                type="radio"
+                name="background-removal-mode"
+                value="connected"
+                checked={backgroundRemovalMode === 'connected'}
+                onChange={() => setBackgroundRemovalMode('connected')}
+              />
+              <span>魔棒连通</span>
+            </label>
+
             <label className="color-control">
               <span>
                 <span className="label">待去除背景色</span>
@@ -384,13 +563,18 @@ export function MainControlPanel({
               className="tool-button background-apply-button"
               onClick={handleApplyBackgroundRemoval}
               disabled={
-                !image || !hasBackgroundColorSelection || backgroundTransparentPixelCount === 0
+                !image ||
+                !hasBackgroundColorSelection ||
+                (backgroundRemovalMode === 'connected' && !hasConnectedBackgroundPoint) ||
+                backgroundTransparentPixelCount === 0
               }
             >
               {!image
                 ? '先导入图片'
                 : !hasBackgroundColorSelection
                   ? '先取不透明背景色'
+                  : backgroundRemovalMode === 'connected' && !hasConnectedBackgroundPoint
+                  ? '先点击背景区域'
                   : backgroundTransparentPixelCount === 0
                   ? '无可应用像素'
                   : `应用为透明（${backgroundTransparentPixelCount} 像素）`}
@@ -440,7 +624,7 @@ export function MainControlPanel({
           </div>
 
           <p className="hint">
-            取色和调容差会先更新预览，不会立刻改原图；背景预览开关和预览色集中在公共预览工具中，点击“应用为透明”后，当前匹配的背景像素才会写入并参与切帧、重组和导出。
+            全图容差会处理所有相近颜色；魔棒连通只会处理与点击点连通的背景区域，更适合避免误删角色内部相近颜色。点击“应用为透明”后才会写入并参与切帧、重组和导出。
           </p>
           {backgroundRemovalStatus ? (
             <p className="background-status">{backgroundRemovalStatus}</p>

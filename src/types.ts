@@ -14,6 +14,14 @@ export type LoadedImage = {
 
 export type ExportBackgroundMode = 'transparent' | 'solid';
 export type ResolutionScale = 1 | 0.75 | 0.5 | 0.25;
+export type BackgroundRemovalMode = 'global' | 'connected';
+export type ExportFormat = 'png' | 'gif';
+
+export type VideoExtractionOptions = {
+  frameCount: number;
+  startTime: number;
+  endTime: number;
+};
 
 export type RgbColor = {
   red: number;
@@ -34,6 +42,16 @@ export type CropInsets = {
 };
 
 export type CropInsetKey = keyof CropInsets;
+
+export type ImageHistoryEntry = {
+  label: string;
+  image: LoadedImage;
+  resolutionScale: ResolutionScale;
+  cropInsets: CropInsets;
+  backgroundColor: string;
+  hasBackgroundColorSelection: boolean;
+  backgroundSamplePoint: CanvasPoint | null;
+};
 
 export type SpriteFrame = {
   id: string;
