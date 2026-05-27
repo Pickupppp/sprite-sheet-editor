@@ -34,9 +34,23 @@ const DEFAULT_GRID_ROWS = 4;
 const DEFAULT_GRID_COLUMNS = 4;
 const MIN_GRID_SIZE = 1;
 const MAX_GRID_SIZE = 30;
+const DEFAULT_ALPHA_THRESHOLD = 8;
+const DEFAULT_MIN_NEIGHBOR_COUNT = 1;
+const DEFAULT_MIN_COMPONENT_SIZE = 4;
+const DEFAULT_FRINGE_TOLERANCE = 72;
+const DEFAULT_FRINGE_RADIUS = 1;
+const DEFAULT_GRID_OVERLAY_SIZE = 16;
 const DEFAULT_ANIMATION_FRAME_INTERVAL_MS = 180;
 const MIN_ANIMATION_FRAME_INTERVAL_MS = 60;
 const MAX_ANIMATION_FRAME_INTERVAL_MS = 1000;
+const DEFAULT_PIXEL_BLOCK_SIZE = 4;
+const MIN_PIXEL_BLOCK_SIZE = 1;
+const MAX_PIXEL_BLOCK_SIZE = 32;
+const DEFAULT_SNAP_ALPHA_THRESHOLD = 32;
+const MAX_SNAP_ALPHA_THRESHOLD = 128;
+const DEFAULT_QUANTIZE_COLOR_COUNT = 16;
+const MIN_QUANTIZE_COLOR_COUNT = 2;
+const MAX_QUANTIZE_COLOR_COUNT = 256;
 
 type ExportBackgroundMode = 'transparent' | 'solid';
 type ResolutionScale = (typeof RESOLUTION_SCALE_OPTIONS)[number];
@@ -421,6 +435,34 @@ function renderScaledImageDataToCanvas(
   context.drawImage(sourceCanvas, 0, 0, canvas.width, canvas.height);
 }
 
+function drawGridOverlay(canvas: HTMLCanvasElement, imageData: ImageData, scale: number, cellSize: number) {
+  const context = canvas.getContext('2d');
+  if (!context) {
+    return;
+  }
+
+  const scaledCellSize = Math.max(1, cellSize) * scale;
+  context.save();
+  context.strokeStyle = 'rgba(229, 183, 121, 0.36)';
+  context.lineWidth = 1;
+
+  for (let x = 0; x <= imageData.width * scale; x += scaledCellSize) {
+    context.beginPath();
+    context.moveTo(Math.round(x) + 0.5, 0);
+    context.lineTo(Math.round(x) + 0.5, imageData.height * scale);
+    context.stroke();
+  }
+
+  for (let y = 0; y <= imageData.height * scale; y += scaledCellSize) {
+    context.beginPath();
+    context.moveTo(0, Math.round(y) + 0.5);
+    context.lineTo(imageData.width * scale, Math.round(y) + 0.5);
+    context.stroke();
+  }
+
+  context.restore();
+}
+
 function removeMatchingBackground(
   sourceImageData: ImageData,
   backgroundColor: string,
@@ -555,6 +597,642 @@ function countTransparentPixels(imageData: ImageData) {
   }
 
   return transparentPixelCount;
+}
+
+function getColorDistanceToRgb(data: Uint8ClampedArray, pixelIndex: number, color: RgbColor) {
+  const redDistance = data[pixelIndex] - color.red;
+  const greenDistance = data[pixelIndex + 1] - color.green;
+  const blueDistance = data[pixelIndex + 2] - color.blue;
+
+  return Math.sqrt(redDistance * redDistance + greenDistance * greenDistance + blueDistance * blueDistance);
+}
+
+function getAlphaIndex(width: number, x: number, y: number) {
+  return (y * width + x) * 4 + 3;
+}
+
+function isNearTransparentPixel(imageData: ImageData, x: number, y: number, radius: number) {
+  for (let offsetY = -radius; offsetY <= radius; offsetY += 1) {
+    for (let offsetX = -radius; offsetX <= radius; offsetX += 1) {
+      if (offsetX === 0 && offsetY === 0) {
+        continue;
+      }
+
+      const nextX = x + offsetX;
+      const nextY = y + offsetY;
+      if (
+        nextX >= 0 &&
+        nextY >= 0 &&
+        nextX < imageData.width &&
+        nextY < imageData.height &&
+        imageData.data[getAlphaIndex(imageData.width, nextX, nextY)] === 0
+      ) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function removeBackgroundFringe(
+  sourceImageData: ImageData,
+  backgroundColor: string,
+  fringeTolerance: number,
+  edgeRadius: number,
+) {
+  const targetColor = hexToRgb(backgroundColor);
+  const pixels = new Uint8ClampedArray(sourceImageData.data);
+  let transparentPixelCount = 0;
+  let recoloredPixelCount = 0;
+
+  for (let y = 0; y < sourceImageData.height; y += 1) {
+    for (let x = 0; x < sourceImageData.width; x += 1) {
+      const pixelIndex = (y * sourceImageData.width + x) * 4;
+      if (sourceImageData.data[pixelIndex + 3] === 0) {
+        continue;
+      }
+
+      if (!isNearTransparentPixel(sourceImageData, x, y, edgeRadius)) {
+        continue;
+      }
+
+      const distanceToBackground = getColorDistanceToRgb(sourceImageData.data, pixelIndex, targetColor);
+      if (distanceToBackground <= fringeTolerance) {
+        pixels[pixelIndex + 3] = 0;
+        transparentPixelCount += 1;
+        continue;
+      }
+
+      let redTotal = 0;
+      let greenTotal = 0;
+      let blueTotal = 0;
+      let sampleCount = 0;
+
+      for (let offsetY = -2; offsetY <= 2; offsetY += 1) {
+        for (let offsetX = -2; offsetX <= 2; offsetX += 1) {
+          const nextX = x + offsetX;
+          const nextY = y + offsetY;
+          if (
+            (offsetX === 0 && offsetY === 0) ||
+            nextX < 0 ||
+            nextY < 0 ||
+            nextX >= sourceImageData.width ||
+            nextY >= sourceImageData.height
+          ) {
+            continue;
+          }
+
+          const sampleIndex = (nextY * sourceImageData.width + nextX) * 4;
+          if (
+            sourceImageData.data[sampleIndex + 3] === 0 ||
+            isNearTransparentPixel(sourceImageData, nextX, nextY, edgeRadius) ||
+            getColorDistanceToRgb(sourceImageData.data, sampleIndex, targetColor) <= fringeTolerance
+          ) {
+            continue;
+          }
+
+          redTotal += sourceImageData.data[sampleIndex];
+          greenTotal += sourceImageData.data[sampleIndex + 1];
+          blueTotal += sourceImageData.data[sampleIndex + 2];
+          sampleCount += 1;
+        }
+      }
+
+      if (sampleCount > 0 && distanceToBackground <= fringeTolerance * 1.8) {
+        pixels[pixelIndex] = Math.round(redTotal / sampleCount);
+        pixels[pixelIndex + 1] = Math.round(greenTotal / sampleCount);
+        pixels[pixelIndex + 2] = Math.round(blueTotal / sampleCount);
+        recoloredPixelCount += 1;
+      }
+    }
+  }
+
+  return {
+    imageData: new ImageData(pixels, sourceImageData.width, sourceImageData.height),
+    recoloredPixelCount,
+    transparentPixelCount,
+  };
+}
+
+function cleanPixelNoise(
+  sourceImageData: ImageData,
+  alphaThreshold: number,
+  minNeighborCount: number,
+  minComponentSize: number,
+) {
+  const width = sourceImageData.width;
+  const height = sourceImageData.height;
+  const pixels = new Uint8ClampedArray(sourceImageData.data);
+  let removedPixelCount = 0;
+
+  for (let index = 3; index < pixels.length; index += 4) {
+    if (pixels[index] > 0 && pixels[index] <= alphaThreshold) {
+      pixels[index] = 0;
+      removedPixelCount += 1;
+    }
+  }
+
+  const alphaSnapshot = new Uint8ClampedArray(pixels);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const alphaIndex = getAlphaIndex(width, x, y);
+      if (alphaSnapshot[alphaIndex] === 0) {
+        continue;
+      }
+
+      let neighborCount = 0;
+      for (let offsetY = -1; offsetY <= 1; offsetY += 1) {
+        for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
+          if (offsetX === 0 && offsetY === 0) {
+            continue;
+          }
+
+          const nextX = x + offsetX;
+          const nextY = y + offsetY;
+          if (
+            nextX >= 0 &&
+            nextY >= 0 &&
+            nextX < width &&
+            nextY < height &&
+            alphaSnapshot[getAlphaIndex(width, nextX, nextY)] > 0
+          ) {
+            neighborCount += 1;
+          }
+        }
+      }
+
+      if (neighborCount < minNeighborCount) {
+        pixels[alphaIndex] = 0;
+        removedPixelCount += 1;
+      }
+    }
+  }
+
+  const visited = new Uint8Array(width * height);
+  const queue: CanvasPoint[] = [];
+  const component: CanvasPoint[] = [];
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const pixelOffset = y * width + x;
+      if (visited[pixelOffset] || pixels[getAlphaIndex(width, x, y)] === 0) {
+        continue;
+      }
+
+      queue.length = 0;
+      component.length = 0;
+      visited[pixelOffset] = 1;
+      queue.push({ x, y });
+
+      while (queue.length > 0) {
+        const point = queue.shift()!;
+        component.push(point);
+
+        for (let offsetY = -1; offsetY <= 1; offsetY += 1) {
+          for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
+            if (offsetX === 0 && offsetY === 0) {
+              continue;
+            }
+
+            const nextX = point.x + offsetX;
+            const nextY = point.y + offsetY;
+            const nextOffset = nextY * width + nextX;
+            if (
+              nextX >= 0 &&
+              nextY >= 0 &&
+              nextX < width &&
+              nextY < height &&
+              !visited[nextOffset] &&
+              pixels[getAlphaIndex(width, nextX, nextY)] > 0
+            ) {
+              visited[nextOffset] = 1;
+              queue.push({ x: nextX, y: nextY });
+            }
+          }
+        }
+      }
+
+      if (component.length < minComponentSize) {
+        component.forEach((point) => {
+          const alphaIndex = getAlphaIndex(width, point.x, point.y);
+          if (pixels[alphaIndex] > 0) {
+            pixels[alphaIndex] = 0;
+            removedPixelCount += 1;
+          }
+        });
+      }
+    }
+  }
+
+  return {
+    imageData: new ImageData(pixels, width, height),
+    removedPixelCount,
+  };
+}
+
+function getOpaqueBounds(imageData: ImageData) {
+  let minX = imageData.width;
+  let minY = imageData.height;
+  let maxX = -1;
+  let maxY = -1;
+
+  for (let y = 0; y < imageData.height; y += 1) {
+    for (let x = 0; x < imageData.width; x += 1) {
+      if (imageData.data[getAlphaIndex(imageData.width, x, y)] === 0) {
+        continue;
+      }
+
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+    }
+  }
+
+  return maxX >= 0 ? { minX, minY, maxX, maxY } : null;
+}
+
+function alignSpriteFramesBottomCenter(sourceImageData: ImageData, rows: number, columns: number) {
+  const frames = sliceSpriteSheet(sourceImageData, rows, columns);
+  const outputPixels = new Uint8ClampedArray(sourceImageData.width * sourceImageData.height * 4);
+  let alignedFrameCount = 0;
+
+  frames.forEach((frame) => {
+    const bounds = getOpaqueBounds(frame.imageData);
+    if (!bounds) {
+      return;
+    }
+
+    const contentWidth = bounds.maxX - bounds.minX + 1;
+    const contentHeight = bounds.maxY - bounds.minY + 1;
+    const targetX = Math.floor((frame.width - contentWidth) / 2);
+    const targetY = frame.height - contentHeight;
+    const deltaX = targetX - bounds.minX;
+    const deltaY = targetY - bounds.minY;
+
+    if (deltaX !== 0 || deltaY !== 0) {
+      alignedFrameCount += 1;
+    }
+
+    for (let y = bounds.minY; y <= bounds.maxY; y += 1) {
+      for (let x = bounds.minX; x <= bounds.maxX; x += 1) {
+        const sourceIndex = (y * frame.width + x) * 4;
+        if (frame.imageData.data[sourceIndex + 3] === 0) {
+          continue;
+        }
+
+        const targetXInFrame = x + deltaX;
+        const targetYInFrame = y + deltaY;
+        if (
+          targetXInFrame < 0 ||
+          targetYInFrame < 0 ||
+          targetXInFrame >= frame.width ||
+          targetYInFrame >= frame.height
+        ) {
+          continue;
+        }
+
+        const targetIndex =
+          ((frame.y + targetYInFrame) * sourceImageData.width + frame.x + targetXInFrame) * 4;
+        outputPixels[targetIndex] = frame.imageData.data[sourceIndex];
+        outputPixels[targetIndex + 1] = frame.imageData.data[sourceIndex + 1];
+        outputPixels[targetIndex + 2] = frame.imageData.data[sourceIndex + 2];
+        outputPixels[targetIndex + 3] = frame.imageData.data[sourceIndex + 3];
+      }
+    }
+  });
+
+  return {
+    alignedFrameCount,
+    imageData: new ImageData(outputPixels, sourceImageData.width, sourceImageData.height),
+  };
+}
+
+function countUniqueOpaqueColors(sourceImageData: ImageData): number {
+  const colorSet = new Set<number>();
+  for (let i = 0; i < sourceImageData.data.length; i += 4) {
+    if (sourceImageData.data[i + 3] === 0) continue;
+    colorSet.add(
+      (sourceImageData.data[i] << 16) |
+      (sourceImageData.data[i + 1] << 8) |
+      sourceImageData.data[i + 2],
+    );
+  }
+  return colorSet.size;
+}
+
+function detectPixelBlockSize(sourceImageData: ImageData): number {
+  const width = sourceImageData.width;
+  const height = sourceImageData.height;
+  const data = sourceImageData.data;
+  const maxBlockSize = Math.min(16, Math.floor(Math.min(width, height) / 4));
+
+  if (maxBlockSize < 2) return 1;
+
+  let bestSize = 4;
+  let bestScore = -1;
+
+  for (let blockSize = 2; blockSize <= maxBlockSize; blockSize++) {
+    let score = 0;
+    let sampledBlocks = 0;
+    const stepX = Math.max(1, Math.floor(width / blockSize / 8));
+    const stepY = Math.max(1, Math.floor(height / blockSize / 8));
+
+    for (let blockY = 0; blockY + blockSize <= height; blockY += blockSize * stepY) {
+      for (let blockX = 0; blockX + blockSize <= width; blockX += blockSize * stepX) {
+        sampledBlocks++;
+        const colorCounts = new Map<number, number>();
+        let totalPixels = 0;
+
+        for (let dy = 0; dy < blockSize; dy++) {
+          for (let dx = 0; dx < blockSize; dx++) {
+            const idx = ((blockY + dy) * width + (blockX + dx)) * 4;
+            if (data[idx + 3] === 0) continue;
+            totalPixels++;
+            const key =
+              ((data[idx] >> 4) << 8) | ((data[idx + 1] >> 4) << 4) | (data[idx + 2] >> 4);
+            colorCounts.set(key, (colorCounts.get(key) || 0) + 1);
+          }
+        }
+
+        if (totalPixels === 0) continue;
+
+        let maxCount = 0;
+        colorCounts.forEach((count) => {
+          if (count > maxCount) maxCount = count;
+        });
+
+        const dominance = maxCount / totalPixels;
+        if (dominance >= 0.6) {
+          score += dominance;
+        }
+      }
+    }
+
+    const normalizedScore = sampledBlocks > 0 ? score / sampledBlocks : 0;
+    if (normalizedScore > bestScore) {
+      bestScore = normalizedScore;
+      bestSize = blockSize;
+    }
+  }
+
+  return bestSize;
+}
+
+function snapToPixelGrid(
+  sourceImageData: ImageData,
+  blockSize: number,
+  alphaThreshold: number,
+): { imageData: ImageData; snappedBlockCount: number } {
+  const width = sourceImageData.width;
+  const height = sourceImageData.height;
+  const pixels = new Uint8ClampedArray(sourceImageData.data);
+  let snappedBlockCount = 0;
+
+  for (let blockY = 0; blockY < height; blockY += blockSize) {
+    for (let blockX = 0; blockX < width; blockX += blockSize) {
+      const colorCounts = new Map<number, { r: number; g: number; b: number; count: number }>();
+      let opaqueCount = 0;
+      let transparentCount = 0;
+      const blockHeight = Math.min(blockSize, height - blockY);
+      const blockWidth = Math.min(blockSize, width - blockX);
+
+      for (let dy = 0; dy < blockHeight; dy++) {
+        for (let dx = 0; dx < blockWidth; dx++) {
+          const index = ((blockY + dy) * width + (blockX + dx)) * 4;
+          if (sourceImageData.data[index + 3] < alphaThreshold) {
+            transparentCount++;
+            continue;
+          }
+
+          opaqueCount++;
+          const r = sourceImageData.data[index];
+          const g = sourceImageData.data[index + 1];
+          const b = sourceImageData.data[index + 2];
+          const key = (r << 16) | (g << 8) | b;
+          const existing = colorCounts.get(key);
+          if (existing) {
+            existing.count++;
+          } else {
+            colorCounts.set(key, { r, g, b, count: 1 });
+          }
+        }
+      }
+
+      let dominantColor: { r: number; g: number; b: number } | null = null;
+      let maxCount = 0;
+      for (const entry of colorCounts.values()) {
+        if (entry.count > maxCount) {
+          maxCount = entry.count;
+          dominantColor = entry;
+        }
+      }
+
+      const makeTransparent = opaqueCount <= transparentCount;
+
+      for (let dy = 0; dy < blockHeight; dy++) {
+        for (let dx = 0; dx < blockWidth; dx++) {
+          const index = ((blockY + dy) * width + (blockX + dx)) * 4;
+
+          if (makeTransparent) {
+            if (pixels[index + 3] > 0) {
+              pixels[index] = 0;
+              pixels[index + 1] = 0;
+              pixels[index + 2] = 0;
+              pixels[index + 3] = 0;
+              snappedBlockCount++;
+            }
+          } else if (dominantColor) {
+            if (
+              pixels[index] !== dominantColor.r ||
+              pixels[index + 1] !== dominantColor.g ||
+              pixels[index + 2] !== dominantColor.b ||
+              pixels[index + 3] < alphaThreshold
+            ) {
+              pixels[index] = dominantColor.r;
+              pixels[index + 1] = dominantColor.g;
+              pixels[index + 2] = dominantColor.b;
+              pixels[index + 3] = 255;
+              snappedBlockCount++;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return { imageData: new ImageData(pixels, width, height), snappedBlockCount };
+}
+
+function quantizeColors(
+  sourceImageData: ImageData,
+  targetColorCount: number,
+): { imageData: ImageData; originalColorCount: number; quantizedColorCount: number } {
+  const data = sourceImageData.data;
+  const colorMap = new Map<number, { r: number; g: number; b: number; count: number }>();
+
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i + 3] === 0) continue;
+    const key = (data[i] << 16) | (data[i + 1] << 8) | data[i + 2];
+    const existing = colorMap.get(key);
+    if (existing) {
+      existing.count++;
+    } else {
+      colorMap.set(key, { r: data[i], g: data[i + 1], b: data[i + 2], count: 1 });
+    }
+  }
+
+  const originalColorCount = colorMap.size;
+
+  if (originalColorCount <= targetColorCount) {
+    return {
+      imageData: new ImageData(
+        new Uint8ClampedArray(data),
+        sourceImageData.width,
+        sourceImageData.height,
+      ),
+      originalColorCount,
+      quantizedColorCount: originalColorCount,
+    };
+  }
+
+  type ColorEntry = { r: number; g: number; b: number; count: number };
+  const allColors: ColorEntry[] = Array.from(colorMap.values());
+
+  type ColorBox = {
+    entries: ColorEntry[];
+    minR: number;
+    maxR: number;
+    minG: number;
+    maxG: number;
+    minB: number;
+    maxB: number;
+    totalCount: number;
+  };
+
+  function createBox(entries: ColorEntry[]): ColorBox {
+    let minR = 255;
+    let maxR = 0;
+    let minG = 255;
+    let maxG = 0;
+    let minB = 255;
+    let maxB = 0;
+    let totalCount = 0;
+    entries.forEach((e) => {
+      minR = Math.min(minR, e.r);
+      maxR = Math.max(maxR, e.r);
+      minG = Math.min(minG, e.g);
+      maxG = Math.max(maxG, e.g);
+      minB = Math.min(minB, e.b);
+      maxB = Math.max(maxB, e.b);
+      totalCount += e.count;
+    });
+    return { entries, minR, maxR, minG, maxG, minB, maxB, totalCount };
+  }
+
+  let boxes: ColorBox[] = [createBox(allColors)];
+
+  while (boxes.length < targetColorCount) {
+    let maxVolume = -1;
+    let splitIndex = -1;
+
+    boxes.forEach((box, index) => {
+      if (box.entries.length <= 1) return;
+      const volume =
+        (box.maxR - box.minR) * (box.maxG - box.minG) * (box.maxB - box.minB);
+      if (volume > maxVolume) {
+        maxVolume = volume;
+        splitIndex = index;
+      }
+    });
+
+    if (splitIndex === -1) break;
+
+    const box = boxes[splitIndex];
+    const rangeR = box.maxR - box.minR;
+    const rangeG = box.maxG - box.minG;
+    const rangeB = box.maxB - box.minB;
+
+    if (rangeR >= rangeG && rangeR >= rangeB) {
+      box.entries.sort((a, b) => a.r - b.r);
+    } else if (rangeG >= rangeR && rangeG >= rangeB) {
+      box.entries.sort((a, b) => a.g - b.g);
+    } else {
+      box.entries.sort((a, b) => a.b - b.b);
+    }
+
+    let cumulativeCount = 0;
+    let medianIndex = 0;
+    const halfCount = box.totalCount / 2;
+    for (let i = 0; i < box.entries.length; i++) {
+      cumulativeCount += box.entries[i].count;
+      if (cumulativeCount >= halfCount) {
+        medianIndex = i + 1;
+        break;
+      }
+    }
+    medianIndex = Math.max(1, Math.min(medianIndex, box.entries.length - 1));
+
+    boxes.splice(
+      splitIndex,
+      1,
+      createBox(box.entries.slice(0, medianIndex)),
+      createBox(box.entries.slice(medianIndex)),
+    );
+  }
+
+  const palette = boxes.map((box) => {
+    let totalR = 0;
+    let totalG = 0;
+    let totalB = 0;
+    let totalCount = 0;
+    box.entries.forEach((c) => {
+      totalR += c.r * c.count;
+      totalG += c.g * c.count;
+      totalB += c.b * c.count;
+      totalCount += c.count;
+    });
+    return totalCount > 0
+      ? {
+          r: Math.round(totalR / totalCount),
+          g: Math.round(totalG / totalCount),
+          b: Math.round(totalB / totalCount),
+        }
+      : { r: 0, g: 0, b: 0 };
+  });
+
+  const pixels = new Uint8ClampedArray(data);
+  for (let i = 0; i < pixels.length; i += 4) {
+    if (pixels[i + 3] === 0) continue;
+
+    let minDist = Infinity;
+    let nearestR = 0;
+    let nearestG = 0;
+    let nearestB = 0;
+    for (const color of palette) {
+      const dr = pixels[i] - color.r;
+      const dg = pixels[i + 1] - color.g;
+      const db = pixels[i + 2] - color.b;
+      const dist = dr * dr + dg * dg + db * db;
+      if (dist < minDist) {
+        minDist = dist;
+        nearestR = color.r;
+        nearestG = color.g;
+        nearestB = color.b;
+      }
+    }
+
+    pixels[i] = nearestR;
+    pixels[i + 1] = nearestG;
+    pixels[i + 2] = nearestB;
+  }
+
+  return {
+    imageData: new ImageData(pixels, sourceImageData.width, sourceImageData.height),
+    originalColorCount,
+    quantizedColorCount: palette.length,
+  };
 }
 
 function createInitialFinalSequenceRows(): FinalSequenceRow[] {
@@ -893,14 +1571,30 @@ function App() {
   const [exportBackgroundColor, setExportBackgroundColor] = React.useState(
     DEFAULT_EXPORT_BACKGROUND_COLOR,
   );
+  const [alphaThreshold, setAlphaThreshold] = React.useState(DEFAULT_ALPHA_THRESHOLD);
+  const [minNeighborCount, setMinNeighborCount] = React.useState(DEFAULT_MIN_NEIGHBOR_COUNT);
+  const [minComponentSize, setMinComponentSize] = React.useState(DEFAULT_MIN_COMPONENT_SIZE);
+  const [fringeTolerance, setFringeTolerance] = React.useState(DEFAULT_FRINGE_TOLERANCE);
+  const [fringeRadius, setFringeRadius] = React.useState(DEFAULT_FRINGE_RADIUS);
+  const [isGridOverlayEnabled, setIsGridOverlayEnabled] = React.useState(false);
+  const [gridOverlaySize, setGridOverlaySize] = React.useState(DEFAULT_GRID_OVERLAY_SIZE);
   const [backgroundRemovalStatus, setBackgroundRemovalStatus] = React.useState('');
   const [cropStatus, setCropStatus] = React.useState('');
+  const [pixelCleanupStatus, setPixelCleanupStatus] = React.useState('');
+  const [pixelBlockSize, setPixelBlockSize] = React.useState(DEFAULT_PIXEL_BLOCK_SIZE);
+  const [snapAlphaThreshold, setSnapAlphaThreshold] = React.useState(DEFAULT_SNAP_ALPHA_THRESHOLD);
+  const [quantizeColorCount, setQuantizeColorCount] = React.useState(DEFAULT_QUANTIZE_COLOR_COUNT);
+  const [pixelNormalizeStatus, setPixelNormalizeStatus] = React.useState('');
   const [importStatus, setImportStatus] = React.useState('');
   const [exportStatus, setExportStatus] = React.useState('');
   const [error, setError] = React.useState('');
 
   const currentTransparentPixelCount = React.useMemo(() => {
     return image ? countTransparentPixels(image.imageData) : 0;
+  }, [image]);
+
+  const currentUniqueColorCount = React.useMemo(() => {
+    return image ? countUniqueOpaqueColors(image.imageData) : 0;
   }, [image]);
 
   const processedImageData = React.useMemo(() => {
@@ -1000,7 +1694,10 @@ function App() {
     }
 
     renderScaledImageDataToCanvas(canvas, processedImageData.imageData, scale);
-  }, [image, processedImageData, scale]);
+    if (isGridOverlayEnabled) {
+      drawGridOverlay(canvas, processedImageData.imageData, scale, gridOverlaySize);
+    }
+  }, [gridOverlaySize, image, isGridOverlayEnabled, processedImageData, scale]);
 
   React.useEffect(() => {
     const currentRowIds = new Set(finalSequenceRows.map((row) => row.id));
@@ -1102,6 +1799,8 @@ function App() {
       setHasBackgroundColorSelection(false);
       setBackgroundRemovalStatus('');
       setCropStatus('');
+      setPixelCleanupStatus('');
+      setPixelNormalizeStatus('');
       setImportStatus(
         sourceType === 'video' && extractedFrameCount
           ? `已抽取 ${extractedFrameCount} 帧，并组合为 ${preparedImage.imageData.width} × ${preparedImage.imageData.height}px 单行长图。`
@@ -1149,6 +1848,8 @@ function App() {
           : `已将处理分辨率缩小到 ${formatResolutionScale(nextResolutionScale)}，请重新取色。`,
       );
       setCropStatus('处理分辨率已变化，裁剪数值已按比例调整。');
+      setPixelCleanupStatus('');
+      setPixelNormalizeStatus('');
       setExportStatus('');
     } catch {
       setError('调整处理分辨率失败，当前浏览器无法重新采样图片。');
@@ -1184,6 +1885,8 @@ function App() {
       setCropStatus(
         `已裁剪为 ${preparedImage.imageData.width} × ${preparedImage.imageData.height}px，切分前请重新取色。`,
       );
+      setPixelCleanupStatus('');
+      setPixelNormalizeStatus('');
       setExportStatus('');
     } catch {
       setError('调整裁剪区域失败，当前浏览器无法重新生成图片。');
@@ -1213,6 +1916,8 @@ function App() {
       setHasBackgroundColorSelection(false);
       setBackgroundRemovalStatus('');
       setCropStatus('已清除裁剪，恢复当前处理分辨率下的完整画布。');
+      setPixelCleanupStatus('');
+      setPixelNormalizeStatus('');
       setExportStatus('');
     } catch {
       setError('重置裁剪失败，当前浏览器无法重新生成图片。');
@@ -1269,9 +1974,140 @@ function App() {
       ...image,
       imageData: removedBackground.imageData,
     });
+    imageDataRef.current = removedBackground.imageData;
     setBackgroundRemovalStatus(
       `已将 ${removedBackground.transparentPixelCount} 个背景像素变为透明。`,
     );
+    setPixelCleanupStatus('');
+    setPixelNormalizeStatus('');
+  }
+
+  function handleCleanPixelNoise() {
+    if (!image) {
+      return;
+    }
+
+    const cleaned = cleanPixelNoise(
+      image.imageData,
+      alphaThreshold,
+      minNeighborCount,
+      minComponentSize,
+    );
+
+    if (cleaned.removedPixelCount === 0) {
+      setPixelCleanupStatus('没有发现符合当前阈值的毛刺或小色块，可调高阈值后再试。');
+      return;
+    }
+
+    setImage({
+      ...image,
+      imageData: cleaned.imageData,
+    });
+    imageDataRef.current = cleaned.imageData;
+    resetFrameAssembly();
+    setPixelCleanupStatus(`已清理 ${cleaned.removedPixelCount} 个疑似毛刺/小杂色像素。`);
+    setExportStatus('');
+  }
+
+  function handleRemoveBackgroundFringe() {
+    if (!image) {
+      return;
+    }
+
+    if (!hasBackgroundColorSelection) {
+      setPixelCleanupStatus('请先在“去背景色”区域取背景色，再执行去背景色边。');
+      return;
+    }
+
+    const defringed = removeBackgroundFringe(
+      image.imageData,
+      backgroundColor,
+      fringeTolerance,
+      fringeRadius,
+    );
+    const changedPixelCount = defringed.transparentPixelCount + defringed.recoloredPixelCount;
+
+    if (changedPixelCount === 0) {
+      setPixelCleanupStatus('没有发现符合当前阈值的背景色边，可调高边缘容差或边缘范围后再试。');
+      return;
+    }
+
+    setImage({
+      ...image,
+      imageData: defringed.imageData,
+    });
+    imageDataRef.current = defringed.imageData;
+    resetFrameAssembly();
+    setPixelCleanupStatus(
+      `已处理背景色边：透明化 ${defringed.transparentPixelCount} 个像素，重染 ${defringed.recoloredPixelCount} 个边缘像素。`,
+    );
+    setExportStatus('');
+  }
+
+  function handleAlignFramesBottomCenter() {
+    if (!image) {
+      return;
+    }
+
+    const aligned = alignSpriteFramesBottomCenter(image.imageData, gridRows, gridColumns);
+    if (aligned.alignedFrameCount === 0) {
+      setPixelCleanupStatus('当前帧内容已经接近底部居中对齐，未移动任何帧。');
+      return;
+    }
+
+    setImage({
+      ...image,
+      imageData: aligned.imageData,
+    });
+    imageDataRef.current = aligned.imageData;
+    resetFrameAssembly();
+    setPixelCleanupStatus(
+      `已按当前 ${gridRows} × ${gridColumns} 切分配置，对齐 ${aligned.alignedFrameCount} 个非空帧。`,
+    );
+    setExportStatus('');
+  }
+
+  function handleDetectPixelBlockSize() {
+    if (!image) return;
+    const detected = detectPixelBlockSize(image.imageData);
+    setPixelBlockSize(detected);
+    setPixelNormalizeStatus(`自动检测到像素块大小为 ${detected}×${detected}，可调整后点击"对齐到网格"。`);
+  }
+
+  function handleSnapToPixelGrid() {
+    if (!image) return;
+    const snapped = snapToPixelGrid(image.imageData, pixelBlockSize, snapAlphaThreshold);
+    if (snapped.snappedBlockCount === 0) {
+      setPixelNormalizeStatus('当前图像已对齐到指定网格，无需调整。');
+      return;
+    }
+    setImage({ ...image, imageData: snapped.imageData });
+    imageDataRef.current = snapped.imageData;
+    resetFrameAssembly();
+    setPixelCleanupStatus('');
+    setPixelNormalizeStatus(
+      `已按 ${pixelBlockSize}×${pixelBlockSize} 网格对齐，修改了 ${snapped.snappedBlockCount} 个像素。`,
+    );
+    setExportStatus('');
+  }
+
+  function handleQuantizeColors() {
+    if (!image) return;
+    const quantized = quantizeColors(image.imageData, quantizeColorCount);
+    if (quantized.originalColorCount <= quantizeColorCount) {
+      setPixelNormalizeStatus(
+        `当前仅有 ${quantized.originalColorCount} 种颜色，无需量化（目标 ${quantizeColorCount} 色）。`,
+      );
+      return;
+    }
+    setImage({ ...image, imageData: quantized.imageData });
+    imageDataRef.current = quantized.imageData;
+    resetFrameAssembly();
+    setPixelCleanupStatus('');
+    setPixelNormalizeStatus(
+      `色彩量化完成：${quantized.originalColorCount} 种 → ${quantized.quantizedColorCount} 种颜色。`,
+    );
+    setExportStatus('');
   }
 
   function applyEraser(fromPoint: CanvasPoint, toPoint: CanvasPoint) {
@@ -1293,6 +2129,9 @@ function App() {
       : erased.imageData;
     if (canvasRef.current) {
       renderScaledImageDataToCanvas(canvasRef.current, previewImageData, scale);
+      if (isGridOverlayEnabled) {
+        drawGridOverlay(canvasRef.current, previewImageData, scale, gridOverlaySize);
+      }
     }
 
     setImage((currentImage) =>
@@ -1529,6 +2368,58 @@ function App() {
           导入本地像素精灵图或视频，处理背景和杂色后，按可调整网格生成独立帧并重组最终序列。
         </p>
 
+        <section className="workflow-guide" aria-label="新手推荐处理流程">
+          <div className="workflow-guide__header">
+            <p className="eyebrow">Best Practice</p>
+            <h2>新手推荐流程</h2>
+          </div>
+
+          <ol className="workflow-guide__steps">
+            <li>
+              <strong>1. 导入与裁剪</strong>
+              <span>先导入素材，必要时裁掉四周空白或调整处理分辨率。</span>
+            </li>
+            <li>
+              <strong>2. 去背景</strong>
+              <span>点击背景取色，调容差，只在预览满意后点击"应用为透明"。</span>
+            </li>
+            <li>
+              <strong>3. 像素规范化</strong>
+              <span>AI 伪像素先"对齐到网格"，颜色过多再"色彩量化"。</span>
+            </li>
+            <li>
+              <strong>4. 修边和清理</strong>
+              <span>有红边先用"去背景色边"，有噪点再用"自动去毛刺"。</span>
+            </li>
+            <li>
+              <strong>5. 对齐与切帧</strong>
+              <span>确认行列数后，可用底部居中对齐减少动画抖动。</span>
+            </li>
+            <li>
+              <strong>6. 重组与导出</strong>
+              <span>把帧加入多行序列，播放检查动作，再导出 PNG。</span>
+            </li>
+          </ol>
+
+          <div className="workflow-guide__tips">
+            <p>
+              <strong>伪像素：</strong>先用“自动检测块大小”或手动设 N，再点“对齐到网格”。
+            </p>
+            <p>
+              <strong>颜色过多：</strong>设目标色数（如 16），点“色彩量化”用 Median Cut 降色。
+            </p>
+            <p>
+              <strong>红边：</strong>先取背景色并应用透明，再点“去背景色边”。
+            </p>
+            <p>
+              <strong>毛刺：</strong>先用低阈值自动去毛刺，避免误删细节。
+            </p>
+            <p>
+              <strong>帧抖动：</strong>先确认切分网格，再执行底部居中对齐。
+            </p>
+          </div>
+        </section>
+
         <label className="file-picker">
           <span>选择图片或视频</span>
           <input type="file" accept="image/*,video/*" onChange={handleFileChange} />
@@ -1576,6 +2467,43 @@ function App() {
           </label>
         </div>
 
+
+        <div className="canvas-stage">
+          {image ? (
+            <div className="canvas-frame" style={transparentPreviewStyle}>
+              <canvas
+                ref={canvasRef}
+                className={isEraserMode ? 'pixel-canvas pixel-canvas--eraser' : 'pixel-canvas'}
+                onClick={handleCanvasPick}
+                onPointerDown={handleCanvasPointerDown}
+                onPointerMove={handleCanvasPointerMove}
+                onPointerUp={stopErasing}
+                onPointerCancel={stopErasing}
+                onPointerLeave={stopErasing}
+                aria-label={
+                  isEraserMode
+                    ? `${image.name} 橡皮擦画布，拖动可擦除像素`
+                    : `${image.name} 背景透明化预览，点击像素可取色`
+                }
+              />
+            </div>
+          ) : (
+            <div className="empty-state">请选择一张图片开始预览</div>
+          )}
+        </div>
+
+        {image ? (
+          <p className="meta">
+            {image.name} ·{' '}
+            {image.sourceType === 'video' && image.extractedFrameCount
+              ? `视频抽帧 ${image.extractedFrameCount} 帧，单帧 ${image.sourceFrameWidth} × ${image.sourceFrameHeight}px，长图尺寸 ${image.originalWidth} × ${image.originalHeight}px`
+              : `导入尺寸 ${image.originalWidth} × ${image.originalHeight}px`}{' '}
+            · 处理尺寸 {image.width} × {image.height}px · canvas 显示尺寸{' '}
+            {image.width * scale} × {image.height * scale}px · 预计可透明化{' '}
+            {backgroundTransparentPixelCount} 个像素 · 当前图片透明像素{' '}
+            {currentTransparentPixelCount} 个
+          </p>
+        ) : null}
         <section className="crop-panel" aria-label="裁剪周围区域">
           <div className="crop-panel__header">
             <div>
@@ -1810,6 +2738,270 @@ function App() {
           ) : null}
         </section>
 
+        <section className="pixel-cleanup-panel" aria-label="像素清理与对齐">
+          <div className="pixel-cleanup-panel__header">
+            <div>
+              <p className="eyebrow">Pixel Cleanup</p>
+              <h2>像素清理与对齐</h2>
+            </div>
+            <p className="pixel-cleanup-panel__summary">
+              {image
+                ? `当前透明像素 ${currentTransparentPixelCount} 个，按 ${gridRows} × ${gridColumns} 帧网格处理`
+                : '导入图片后可清理毛刺、对齐动作帧并显示辅助网格'}
+            </p>
+          </div>
+
+          <div className="pixel-cleanup-controls">
+            <label className="tolerance-control">
+              <span>
+                <span className="label">Alpha 阈值</span>
+                <strong>{alphaThreshold}</strong>
+              </span>
+              <input
+                type="range"
+                min="0"
+                max="80"
+                step="1"
+                value={alphaThreshold}
+                onChange={(event) => setAlphaThreshold(Number(event.target.value))}
+                aria-label="Alpha 透明阈值"
+              />
+            </label>
+
+            <label className="tolerance-control">
+              <span>
+                <span className="label">邻居下限</span>
+                <strong>{minNeighborCount}</strong>
+              </span>
+              <input
+                type="range"
+                min="0"
+                max="4"
+                step="1"
+                value={minNeighborCount}
+                onChange={(event) => setMinNeighborCount(Number(event.target.value))}
+                aria-label="孤立像素邻居下限"
+              />
+            </label>
+
+            <label className="tolerance-control">
+              <span>
+                <span className="label">小色块阈值</span>
+                <strong>{minComponentSize}px</strong>
+              </span>
+              <input
+                type="range"
+                min="1"
+                max="24"
+                step="1"
+                value={minComponentSize}
+                onChange={(event) => setMinComponentSize(Number(event.target.value))}
+                aria-label="小连通色块阈值"
+              />
+            </label>
+
+            <label className="tolerance-control">
+              <span>
+                <span className="label">边缘容差</span>
+                <strong>{fringeTolerance}</strong>
+              </span>
+              <input
+                type="range"
+                min="0"
+                max="160"
+                step="1"
+                value={fringeTolerance}
+                onChange={(event) => setFringeTolerance(Number(event.target.value))}
+                aria-label="背景色边缘容差"
+              />
+            </label>
+
+            <label className="number-control">
+              <span>
+                <span className="label">边缘范围</span>
+                <strong>{fringeRadius}px</strong>
+              </span>
+              <input
+                type="number"
+                min="1"
+                max="3"
+                value={fringeRadius}
+                onChange={(event) =>
+                  setFringeRadius(Math.max(1, Math.min(3, Math.round(Number(event.target.value) || 1))))
+                }
+                aria-label="背景色边缘处理范围"
+              />
+            </label>
+
+            <button
+              type="button"
+              className="tool-button pixel-cleanup-button"
+              onClick={handleRemoveBackgroundFringe}
+              disabled={!image || !hasBackgroundColorSelection}
+            >
+              去背景色边
+            </button>
+
+            <button
+              type="button"
+              className="tool-button pixel-cleanup-button"
+              onClick={handleCleanPixelNoise}
+              disabled={!image}
+            >
+              自动去毛刺
+            </button>
+
+            <button
+              type="button"
+              className="tool-button"
+              onClick={handleAlignFramesBottomCenter}
+              disabled={!image}
+            >
+              按帧底部居中对齐
+            </button>
+
+            <label className="switch-control">
+              <span>
+                <span className="label">显示网格</span>
+                <strong>{isGridOverlayEnabled ? '开启' : '关闭'}</strong>
+              </span>
+              <input
+                type="checkbox"
+                checked={isGridOverlayEnabled}
+                onChange={(event) => setIsGridOverlayEnabled(event.target.checked)}
+                aria-label="是否显示像素辅助网格"
+              />
+            </label>
+
+            <label className="number-control">
+              <span>
+                <span className="label">网格间距</span>
+                <strong>{gridOverlaySize}px</strong>
+              </span>
+              <input
+                type="number"
+                min="1"
+                max="128"
+                value={gridOverlaySize}
+                onChange={(event) =>
+                  setGridOverlaySize(Math.max(1, Math.min(128, Math.round(Number(event.target.value) || 1))))
+                }
+                disabled={!isGridOverlayEnabled}
+                aria-label="像素辅助网格间距"
+              />
+            </label>
+          </div>
+
+          <p className="hint">
+            建议先“自动去毛刺”清理孤立噪点和小色块，再按当前切分行列执行“底部居中对齐”；如果担心误删细节，请先用较小阈值尝试。
+          </p>
+          {pixelCleanupStatus ? <p className="pixel-cleanup-status">{pixelCleanupStatus}</p> : null}
+        </section>
+
+        <section className="pixel-normalize-panel" aria-label="像素规范化">
+          <div className="pixel-normalize-panel__header">
+            <div>
+              <p className="eyebrow">Pixel Normalize</p>
+              <h2>像素规范化</h2>
+            </div>
+            <p className="pixel-normalize-panel__summary">
+              {image
+                ? `当前 ${currentUniqueColorCount} 种颜色，按 ${pixelBlockSize}×${pixelBlockSize} 块处理`
+                : '导入图片后可将伪像素对齐到统一网格并减少颜色数'}
+            </p>
+          </div>
+
+          <div className="pixel-normalize-controls">
+            <label className="number-control">
+              <span>
+                <span className="label">像素块大小</span>
+                <strong>{pixelBlockSize}×{pixelBlockSize}</strong>
+              </span>
+              <input
+                type="number"
+                min={MIN_PIXEL_BLOCK_SIZE}
+                max={MAX_PIXEL_BLOCK_SIZE}
+                value={pixelBlockSize}
+                onChange={(event) =>
+                  setPixelBlockSize(
+                    Math.max(MIN_PIXEL_BLOCK_SIZE, Math.min(MAX_PIXEL_BLOCK_SIZE, Math.round(Number(event.target.value) || 1))),
+                  )
+                }
+                disabled={!image}
+                aria-label="像素块大小"
+              />
+            </label>
+
+            <button
+              type="button"
+              className="tool-button"
+              onClick={handleDetectPixelBlockSize}
+              disabled={!image}
+            >
+              自动检测块大小
+            </button>
+
+            <label className="tolerance-control">
+              <span>
+                <span className="label">透明阈值</span>
+                <strong>{snapAlphaThreshold}</strong>
+              </span>
+              <input
+                type="range"
+                min="0"
+                max={MAX_SNAP_ALPHA_THRESHOLD}
+                step="1"
+                value={snapAlphaThreshold}
+                onChange={(event) => setSnapAlphaThreshold(Number(event.target.value))}
+                aria-label="网格对齐透明阈值"
+              />
+            </label>
+
+            <button
+              type="button"
+              className="tool-button pixel-normalize-button"
+              onClick={handleSnapToPixelGrid}
+              disabled={!image}
+            >
+              对齐到网格
+            </button>
+
+            <label className="number-control">
+              <span>
+                <span className="label">目标颜色数</span>
+                <strong>{quantizeColorCount} 色</strong>
+              </span>
+              <input
+                type="number"
+                min={MIN_QUANTIZE_COLOR_COUNT}
+                max={MAX_QUANTIZE_COLOR_COUNT}
+                value={quantizeColorCount}
+                onChange={(event) =>
+                  setQuantizeColorCount(
+                    Math.max(MIN_QUANTIZE_COLOR_COUNT, Math.min(MAX_QUANTIZE_COLOR_COUNT, Math.round(Number(event.target.value) || 2))),
+                  )
+                }
+                disabled={!image}
+                aria-label="色彩量化目标颜色数"
+              />
+            </label>
+
+            <button
+              type="button"
+              className="tool-button pixel-normalize-button"
+              onClick={handleQuantizeColors}
+              disabled={!image}
+            >
+              色彩量化
+            </button>
+          </div>
+
+          <p className="hint">
+            AI 生成的像素图常出现"伪像素"（大小不一、带抗锯齿、未对齐网格）和颜色过多（同一区域几十种相近色）。"对齐到网格"将每个 N×N 块统一为主色并消除半透明；"色彩量化"用 Median Cut 算法将颜色数降到目标值。建议先去背景，再对齐网格，最后量化色彩。
+          </p>
+          {pixelNormalizeStatus ? <p className="pixel-normalize-status">{pixelNormalizeStatus}</p> : null}
+        </section>
+
         <div className="eraser-controls" aria-label="橡皮擦设置">
           <button
             type="button"
@@ -1840,43 +3032,6 @@ function App() {
             橡皮擦模式下拖动画布会把当前图片数据中的对应像素转为透明，并保留给后续处理流程使用。
           </p>
         </div>
-
-        <div className="canvas-stage">
-          {image ? (
-            <div className="canvas-frame" style={transparentPreviewStyle}>
-              <canvas
-                ref={canvasRef}
-                className={isEraserMode ? 'pixel-canvas pixel-canvas--eraser' : 'pixel-canvas'}
-                onClick={handleCanvasPick}
-                onPointerDown={handleCanvasPointerDown}
-                onPointerMove={handleCanvasPointerMove}
-                onPointerUp={stopErasing}
-                onPointerCancel={stopErasing}
-                onPointerLeave={stopErasing}
-                aria-label={
-                  isEraserMode
-                    ? `${image.name} 橡皮擦画布，拖动可擦除像素`
-                    : `${image.name} 背景透明化预览，点击像素可取色`
-                }
-              />
-            </div>
-          ) : (
-            <div className="empty-state">请选择一张图片开始预览</div>
-          )}
-        </div>
-
-        {image ? (
-          <p className="meta">
-            {image.name} ·{' '}
-            {image.sourceType === 'video' && image.extractedFrameCount
-              ? `视频抽帧 ${image.extractedFrameCount} 帧，单帧 ${image.sourceFrameWidth} × ${image.sourceFrameHeight}px，长图尺寸 ${image.originalWidth} × ${image.originalHeight}px`
-              : `导入尺寸 ${image.originalWidth} × ${image.originalHeight}px`}{' '}
-            · 处理尺寸 {image.width} × {image.height}px · canvas 显示尺寸{' '}
-            {image.width * scale} × {image.height * scale}px · 预计可透明化{' '}
-            {backgroundTransparentPixelCount} 个像素 · 当前图片透明像素{' '}
-            {currentTransparentPixelCount} 个
-          </p>
-        ) : null}
       </section>
 
       <section className="panel frames-panel">
